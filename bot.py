@@ -12,7 +12,7 @@ from keep_alive import keep_alive
 socket.setdefaulttimeout(15)
 
 # ====== НАСТРОЙКИ ======
-TOKEN = os.environ.get("8736206770:AAF8VFrOitZ4kWguANW8qnm6FTvqYU_OfF8", "")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 SERVER_IP = "54.38.117.76"
 SERVER_PORT = 1321
 ADMIN_IDS = {709672781, 5939366373, 1066139847}  # подгружается из БД при запуске
