@@ -890,15 +890,11 @@ if __name__ == "__main__":
     print("Бот успешно запущен и готов к работе!")
     poll_thread = start_polling()
 
-    # Watchdog — только следит за тем, что поток живой.
-    HEARTBEAT_TIMEOUT = 300  # 5 минут без сообщений — считаем зависшим
+    # Watchdog — перезапускает polling только если поток реально упал.
     while True:
         time.sleep(60)
-        thread_dead = not poll_thread.is_alive()
-        heartbeat_stale = (time.time() - _last_heartbeat) > HEARTBEAT_TIMEOUT
-        if thread_dead or heartbeat_stale:
-            reason = "поток упал" if thread_dead else "нет активности > 5 мин"
-            print(f"⚠️ Watchdog: {reason} — останавливаю polling и перезапускаю...")
+        if not poll_thread.is_alive():
+            print("⚠️ Watchdog: поток упал — перезапускаю polling...")
             try:
                 bot.stop_polling()
             except Exception:
