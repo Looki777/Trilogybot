@@ -8,14 +8,14 @@ from telebot import types
 from samp_client.client import SampClient
 from keep_alive import keep_alive
 
-# Глобальный таймаут на все сетевые операции — никакой запрос не зависнет дольше 15 сек
 socket.setdefaulttimeout(5)
 
 # ====== НАСТРОЙКИ ======
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 SERVER_IP = "54.38.117.76"
 SERVER_PORT = 1321
-ADMIN_IDS = {709672781, 5939366373, 1066139847}  # подгружается из БД при запуске
+ADMIN_IDS = {709672781, 5939366373, 1066139847}
+ADMIN_LEVELS = {}  # user_id -> уровень (1, 2, 3)
 # ==================================================
 
 if not TOKEN:
@@ -24,13 +24,38 @@ if not TOKEN:
 telebot.apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN, threaded=True)
 
-# Heartbeat — обновляется при каждом входящем update для watchdog
 _last_heartbeat = time.time()
+_prev_players = None  # для отслеживания рестарта сервера
+
+# Хранение ID сообщений-уведомлений о обращениях: {req_id: [(admin_id, msg_id), ...]}
+_admin_alert_msgs = {}
 
 @bot.middleware_handler(update_types=["message", "callback_query"])
 def update_heartbeat(bot_instance, update):
     global _last_heartbeat
     _last_heartbeat = time.time()
+
+# ====== УРОВНИ АДМИНИСТРАЦИИ ======
+# 1 = Младший Модератор (только Помощь, читать обращения)
+# 2 = Модератор бота (отвечать на обращения, статистика)
+# 3 = Главный Модератор (всё: рассылка, управление адм, должности)
+
+LEVEL_NAMES = {1: "Младший Модератор", 2: "Модератор бота", 3: "Главный Модератор"}
+
+def get_admin_level(user_id):
+    return ADMIN_LEVELS.get(user_id, 0)
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+def can_answer_support(user_id):
+    return get_admin_level(user_id) >= 2
+
+def can_broadcast(user_id):
+    return get_admin_level(user_id) >= 3
+
+def can_manage_admins(user_id):
+    return get_admin_level(user_id) >= 3
 
 # ====== РАБОТА С БАЗОЙ ДАННЫХ ======
 def init_db():
@@ -49,7 +74,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS server_stats (
             id INTEGER PRIMARY KEY,
             peak_online INTEGER DEFAULT 0,
-            peak_date TEXT
+            peak_date TEXT DEFAULT '',
+            peak_day TEXT DEFAULT '',
+            last_restart TEXT DEFAULT ''
         )
     """)
     cursor.execute("""
@@ -65,13 +92,23 @@ def init_db():
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY KEY
+            user_id INTEGER PRIMARY KEY,
+            admin_level INTEGER DEFAULT 3
         )
     """)
     cursor.execute("INSERT OR IGNORE INTO server_stats (id, peak_online, peak_date) VALUES (1, 0, '')")
-    # Добавляем колонку peak_day в server_stats (для суточного пика)
+
+    # Миграции для существующих БД
+    for col, definition in [
+        ("peak_day", "TEXT DEFAULT ''"),
+        ("last_restart", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE server_stats ADD COLUMN {col} {definition}")
+        except Exception:
+            pass
     try:
-        cursor.execute("ALTER TABLE server_stats ADD COLUMN peak_day TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE admins ADD COLUMN admin_level INTEGER DEFAULT 3")
     except Exception:
         pass
     for col in [("nickname", "TEXT"), ("position", "TEXT DEFAULT 'Игрок'")]:
@@ -79,26 +116,35 @@ def init_db():
             cursor.execute(f"ALTER TABLE users ADD COLUMN {col[0]} {col[1]}")
         except Exception:
             pass
-    # Добавляем хардкод-админов в таблицу
+
+    # Хардкод-админы — уровень 3
     for aid in list(ADMIN_IDS):
-        cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (aid,))
+        cursor.execute("INSERT OR IGNORE INTO admins (user_id, admin_level) VALUES (?, 3)", (aid,))
     conn.commit()
-    # Загружаем всех админов из БД в память
-    cursor.execute("SELECT user_id FROM admins")
+
+    # Загружаем всех админов и уровни в память
+    cursor.execute("SELECT user_id, admin_level FROM admins")
     for row in cursor.fetchall():
-        ADMIN_IDS.add(row[0])
+        uid, lvl = row
+        ADMIN_IDS.add(uid)
+        ADMIN_LEVELS[uid] = lvl if lvl else 3
     conn.close()
 
-def add_admin_db(user_id):
+def add_admin_db(user_id, level=1):
     ADMIN_IDS.add(user_id)
+    ADMIN_LEVELS[user_id] = level
     conn = sqlite3.connect("bot_stats.db", timeout=5)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (user_id,))
+    cursor.execute(
+        "INSERT OR REPLACE INTO admins (user_id, admin_level) VALUES (?, ?)",
+        (user_id, level)
+    )
     conn.commit()
     conn.close()
 
 def remove_admin_db(user_id):
     ADMIN_IDS.discard(user_id)
+    ADMIN_LEVELS.pop(user_id, None)
     conn = sqlite3.connect("bot_stats.db", timeout=5)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
@@ -142,7 +188,8 @@ def get_position(user_id):
     conn.close()
     if row and row[0]:
         return row[0]
-    return "Администратор" if user_id in ADMIN_IDS else "Игрок"
+    level = get_admin_level(user_id)
+    return LEVEL_NAMES.get(level, "Игрок") if level else "Игрок"
 
 def set_position(user_id, position):
     conn = sqlite3.connect("bot_stats.db", timeout=5)
@@ -179,7 +226,6 @@ def update_peak_online(current_players):
     peak, peak_date, peak_day = get_peak_online()
     today = time.strftime("%d.%m.%Y")
     now = time.strftime("%d.%m.%Y %H:%M")
-    # Новый день — сбрасываем пик
     if peak_day != today:
         conn = sqlite3.connect("bot_stats.db", timeout=5)
         cursor = conn.cursor()
@@ -190,7 +236,6 @@ def update_peak_online(current_players):
         conn.commit()
         conn.close()
         return current_players, now
-    # Тот же день — обновляем только если больше
     if current_players > peak:
         conn = sqlite3.connect("bot_stats.db", timeout=5)
         cursor = conn.cursor()
@@ -202,6 +247,21 @@ def update_peak_online(current_players):
         conn.close()
         return current_players, now
     return peak, peak_date
+
+def get_last_restart():
+    conn = sqlite3.connect("bot_stats.db", timeout=5)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_restart FROM server_stats WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else ""
+
+def update_last_restart(restart_time):
+    conn = sqlite3.connect("bot_stats.db", timeout=5)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE server_stats SET last_restart = ? WHERE id = 1", (restart_time,))
+    conn.commit()
+    conn.close()
 
 def save_support_request(user_id, nickname, username, question):
     conn = sqlite3.connect("bot_stats.db", timeout=5)
@@ -259,10 +319,19 @@ def log_support_answer(req_id, player_nick, question, admin_nick, answer, req_da
     except Exception as e:
         print(f"Ошибка записи лога: {e}")
 
+# ====== УДАЛЕНИЕ УВЕДОМЛЕНИЙ У ДРУГИХ АДМИНОВ ======
+def delete_other_admin_alerts(req_id, answering_admin_id):
+    msgs = _admin_alert_msgs.pop(req_id, [])
+    for admin_id, msg_id in msgs:
+        if admin_id != answering_admin_id:
+            try:
+                bot.delete_message(admin_id, msg_id)
+            except Exception:
+                pass
+
 # ====== ФУНКЦИИ СЕРВЕРА И КЛАВИАТУРЫ ======
 def _fetch_samp_info():
-    """Выполняется в отдельном потоке чтобы не заблокировать бота."""
-    SampClient.timeout = 0.5  # максимум 0.5 сек на UDP-ответ
+    SampClient.timeout = 0.5
     start_time = time.time()
     with SampClient(address=SERVER_IP, port=SERVER_PORT) as client:
         info = client.get_server_info()
@@ -270,7 +339,9 @@ def _fetch_samp_info():
         return info, ping
 
 def check_samp_server():
+    global _prev_players
     result = {}
+
     def _run():
         try:
             info, ping = _fetch_samp_info()
@@ -280,31 +351,54 @@ def check_samp_server():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    t.join(timeout=3)  # максимум 3 сек на ответ сервера
+    t.join(timeout=3)
 
     if t.is_alive() or "data" not in result:
         return "❌ <b>Сервер недоступен.</b>"
 
     info, ping = result["data"]
+
+    # Определяем рестарт: сервер вернулся после нуля игроков
+    if _prev_players is not None and _prev_players == 0 and info.players > 0:
+        update_last_restart(time.strftime("%d.%m.%Y %H:%M"))
+    _prev_players = info.players
+
     peak, peak_date = update_peak_online(info.players)
+    last_restart = get_last_restart()
+
+    peak_time = peak_date[11:] if len(peak_date) > 11 else peak_date
+    restart_line = f"🔄 <b>Последний рестарт:</b> {last_restart}\n" if last_restart else ""
+
     return (
         f"🎮 <b>{info.hostname}</b>\n\n"
         f"🌐 <b>IP:</b> <code>{SERVER_IP}:{SERVER_PORT}</code>\n"
         f"👥 <b>Онлайн:</b> {info.players} / {info.max_players}\n"
-        f"🏆 <b>Пик за сегодня:</b> {peak} <i>(был в {peak_date[11:]})</i>\n"
-        f"⚡ <b>Пинг:</b> {ping} мс\n\n"
+        f"🏆 <b>Пик за сегодня:</b> {peak} <i>(в {peak_time})</i>\n"
+        f"⚡ <b>Пинг:</b> {ping} мс\n"
+        f"{restart_line}\n"
         f"🟢 Статус: Работает"
     )
 
 def get_main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(types.KeyboardButton("🌐 Онлайн"), types.KeyboardButton("🔗 Полезные ссылки"))
-    if user_id in ADMIN_IDS:
+    level = get_admin_level(user_id)
+
+    if level == 0:
+        markup.row(types.KeyboardButton("🌐 Онлайн"), types.KeyboardButton("🔗 Полезные ссылки"))
+        markup.row(types.KeyboardButton("🎫 Тех поддержка"))
+    elif level == 1:
+        markup.row(types.KeyboardButton("🌐 Онлайн"), types.KeyboardButton("🔗 Полезные ссылки"))
+        markup.row(types.KeyboardButton("🎫 Тех поддержка"), types.KeyboardButton("📋 Помощь"))
+    elif level == 2:
+        markup.row(types.KeyboardButton("🌐 Онлайн"), types.KeyboardButton("🔗 Полезные ссылки"))
+        markup.row(types.KeyboardButton("🎫 Тех поддержка"), types.KeyboardButton("📬 Непрочитанные"))
+        markup.row(types.KeyboardButton("📊 Статистика"), types.KeyboardButton("📋 Помощь"))
+    else:  # level 3
+        markup.row(types.KeyboardButton("🌐 Онлайн"), types.KeyboardButton("🔗 Полезные ссылки"))
         markup.row(types.KeyboardButton("🎫 Тех поддержка"), types.KeyboardButton("📬 Непрочитанные"))
         markup.row(types.KeyboardButton("📊 Статистика"), types.KeyboardButton("📢 Рассылка"))
         markup.row(types.KeyboardButton("📋 Помощь"))
-    else:
-        markup.row(types.KeyboardButton("🎫 Тех поддержка"))
+
     return markup
 
 # ====== СТАРТ И НИКНЕЙМ ======
@@ -412,10 +506,10 @@ def handle_stata_command(message):
     )
     bot.send_message(user_id, stata_text, parse_mode="HTML")
 
-# ====== КОМАНДА /должность (только для админов) ======
+# ====== КОМАНДА /должность (только уровень 3) ======
 @bot.message_handler(commands=['должность'])
 def handle_set_position(message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not can_manage_admins(message.from_user.id):
         return
     try:
         parts = message.text.split(maxsplit=2)
@@ -426,31 +520,43 @@ def handle_set_position(message):
     except Exception:
         bot.reply_to(message, "❌ Формат: /должность ID Должность\nПример: /должность 123456789 Модератор")
 
-# ====== КОМАНДА /админ и /разадмин (только для админов) ======
+# ====== КОМАНДА /админ и /разадмин (только уровень 3) ======
 @bot.message_handler(commands=['админ'])
 def handle_add_admin(message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not can_manage_admins(message.from_user.id):
         return
     try:
-        parts = message.text.split(maxsplit=1)
+        parts = message.text.split(maxsplit=2)
         target_id = int(parts[1])
-        if target_id in ADMIN_IDS:
-            bot.reply_to(message, f"⚠️ Пользователь <code>{target_id}</code> уже является администратором.", parse_mode="HTML")
+        level = int(parts[2]) if len(parts) > 2 else 1
+        if level not in (1, 2, 3):
+            bot.reply_to(message, "❌ Уровень должен быть 1, 2 или 3.\n\n1 — Младший Модератор\n2 — Модератор бота\n3 — Главный Модератор")
             return
-        add_admin_db(target_id)
-        # Обновляем должность в профиле
-        set_position(target_id, "Администратор")
-        bot.reply_to(message, f"✅ Пользователь <code>{target_id}</code> назначен <b>администратором</b>.", parse_mode="HTML")
-        try:
-            bot.send_message(target_id, "🎉 Вам выданы права <b>администратора</b> бота!", parse_mode="HTML")
-        except Exception:
-            pass
+        level_name = LEVEL_NAMES[level]
+        already_admin = target_id in ADMIN_IDS
+        add_admin_db(target_id, level)
+        set_position(target_id, level_name)
+        if already_admin:
+            bot.reply_to(message, f"✅ Уровень пользователя <code>{target_id}</code> обновлён на <b>{level_name}</b>.", parse_mode="HTML")
+        else:
+            bot.reply_to(message, f"✅ Пользователь <code>{target_id}</code> назначен <b>{level_name}</b>.", parse_mode="HTML")
+            try:
+                bot.send_message(target_id, f"🎉 Вам выданы права <b>{level_name}</b> бота!", parse_mode="HTML")
+            except Exception:
+                pass
     except (IndexError, ValueError):
-        bot.reply_to(message, "❌ Формат: /админ ID\nПример: /админ 123456789")
+        bot.reply_to(
+            message,
+            "❌ Формат: /админ ID уровень\nПример: /админ 123456789 2\n\n"
+            "Уровни:\n"
+            "1 — Младший Модератор\n"
+            "2 — Модератор бота\n"
+            "3 — Главный Модератор"
+        )
 
 @bot.message_handler(commands=['разадмин'])
 def handle_remove_admin(message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not can_manage_admins(message.from_user.id):
         return
     try:
         parts = message.text.split(maxsplit=1)
@@ -468,10 +574,43 @@ def handle_remove_admin(message):
     except (IndexError, ValueError):
         bot.reply_to(message, "❌ Формат: /разадмин ID\nПример: /разадмин 123456789")
 
-# ====== КОМАНДА /лог (только для админов) ======
+# ====== КОМАНДА /admlist (для всей администрации) ======
+@bot.message_handler(commands=['admlist'])
+def handle_admlist(message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = sqlite3.connect("bot_stats.db", timeout=5)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT a.user_id, a.admin_level, u.nickname, u.username
+        FROM admins a
+        LEFT JOIN users u ON a.user_id = u.user_id
+        ORDER BY a.admin_level DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.reply_to(message, "📭 Список администрации пуст.")
+        return
+
+    lines = ["👥 <b>Список администрации бота:</b>\n"]
+    for user_id, level, nickname, username in rows:
+        level_name = LEVEL_NAMES.get(level, f"Уровень {level}")
+        nick = nickname or "—"
+        uname = f"@{username}" if username else "—"
+        lines.append(
+            f"🔹 <b>{level_name}</b>\n"
+            f"   🎮 Ник: <code>{nick}</code>\n"
+            f"   👤 TG: {uname}\n"
+            f"   🆔 ID: <code>{user_id}</code>\n"
+        )
+    bot.send_message(message.chat.id, "\n".join(lines), parse_mode="HTML")
+
+# ====== КОМАНДА /лог (уровень 2+) ======
 @bot.message_handler(commands=['лог'])
 def handle_log_command(message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not can_answer_support(message.from_user.id):
         return
     if not os.path.exists("support_log.txt"):
         bot.reply_to(message, "📭 Лог пуст — ни одного ответа на обращение ещё не было.")
@@ -499,13 +638,14 @@ def handle_links_button(message):
     markup.add(
         types.InlineKeyboardButton("📢 Telegram Канал", url="https://t.me/santropetrilogy_rp"),
         types.InlineKeyboardButton("💬 Telegram Чат", url="https://t.me/santropetrilogy_chat"),
-        types.InlineKeyboardButton("📱 Группа ВКонтакте", url="https://vk.ru/santropetrilogy")
+        types.InlineKeyboardButton("📱 Группа ВКонтакте", url="https://vk.ru/santropetrilogy"),
+        types.InlineKeyboardButton("🌐 Форум", url="http://wh32893.web3.maze-tech.ru/index.php"),
     )
     bot.send_message(message.chat.id, "🔗 <b>Официальные ресурсы проекта:</b>", reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda message: message.text == "📊 Статистика")
 def handle_stats_button(message):
-    if message.chat.id not in ADMIN_IDS:
+    if not can_answer_support(message.chat.id):
         return
     total_users = get_users_count()
     unread = get_unread_count()
@@ -519,33 +659,61 @@ def handle_stats_button(message):
 
 @bot.message_handler(func=lambda message: message.text == "📋 Помощь")
 def handle_help_button(message):
-    if message.chat.id not in ADMIN_IDS:
+    level = get_admin_level(message.chat.id)
+    if level == 0:
         return
-    help_text = (
-        "📋 <b>Команды администратора:</b>\n\n"
-        "👤 <b>Управление пользователями</b>\n"
-        "/админ <code>ID</code> — выдать права администратора\n"
-        "/разадмин <code>ID</code> — снять права администратора\n"
-        "/должность <code>ID Должность</code> — изменить должность игрока\n\n"
-        "🎮 <b>Профиль</b>\n"
-        "/стата — посмотреть свой профиль\n"
-        "/ник — сменить свой никнейм\n\n"
-        "📋 <b>Прочее</b>\n"
-        "/лог — скачать историю ответов тех. поддержки\n\n"
-        "🔘 <b>Кнопки меню</b>\n"
-        "🌐 Онлайн — статус SA:MP сервера\n"
-        "🔗 Полезные ссылки — официальные ресурсы проекта\n"
-        "🎫 Тех поддержка — список обращений и ответ\n"
-        "📬 Непрочитанные — новые необработанные обращения\n"
-        "📊 Статистика — кол-во пользователей и обращений\n"
-        "📢 Рассылка — отправить сообщение всем пользователям"
-    )
+
+    if level == 1:
+        help_text = (
+            "📋 <b>Команды Младшего Модератора:</b>\n\n"
+            "🎮 <b>Профиль</b>\n"
+            "/стата — посмотреть свой профиль\n"
+            "/ник — сменить свой никнейм\n\n"
+            "🔘 <b>Кнопки меню</b>\n"
+            "🌐 Онлайн — статус SA:MP сервера\n"
+            "🔗 Полезные ссылки — официальные ресурсы проекта\n"
+            "🎫 Тех поддержка — просмотр обращений"
+        )
+    elif level == 2:
+        help_text = (
+            "📋 <b>Команды Модератора бота:</b>\n\n"
+            "🎮 <b>Профиль</b>\n"
+            "/стата — посмотреть свой профиль\n"
+            "/ник — сменить свой никнейм\n"
+            "/лог — скачать историю ответов тех. поддержки\n\n"
+            "🔘 <b>Кнопки меню</b>\n"
+            "🌐 Онлайн — статус SA:MP сервера\n"
+            "🔗 Полезные ссылки — официальные ресурсы проекта\n"
+            "🎫 Тех поддержка — ответить на обращения игроков\n"
+            "📬 Непрочитанные — необработанные обращения\n"
+            "📊 Статистика — кол-во пользователей и обращений"
+        )
+    else:  # level 3
+        help_text = (
+            "📋 <b>Команды Главного Модератора:</b>\n\n"
+            "👤 <b>Управление администрацией</b>\n"
+            "/админ <code>ID уровень</code> — выдать права (1/2/3)\n"
+            "/разадмин <code>ID</code> — снять права администратора\n"
+            "/должность <code>ID Должность</code> — изменить должность\n"
+            "/admlist — список всей администрации бота\n\n"
+            "🎮 <b>Профиль</b>\n"
+            "/стата — посмотреть свой профиль\n"
+            "/ник — сменить свой никнейм\n"
+            "/лог — скачать историю ответов тех. поддержки\n\n"
+            "🔘 <b>Кнопки меню</b>\n"
+            "🌐 Онлайн — статус SA:MP сервера\n"
+            "🔗 Полезные ссылки — официальные ресурсы проекта\n"
+            "🎫 Тех поддержка — ответить на обращения игроков\n"
+            "📬 Непрочитанные — необработанные обращения\n"
+            "📊 Статистика — кол-во пользователей и обращений\n"
+            "📢 Рассылка — отправить сообщение всем пользователям"
+        )
     bot.send_message(message.chat.id, help_text, parse_mode="HTML")
 
-# ====== НЕПРОЧИТАННЫЕ ОБРАЩЕНИЯ (только для админов) ======
+# ====== НЕПРОЧИТАННЫЕ ОБРАЩЕНИЯ (уровень 2+) ======
 @bot.message_handler(func=lambda message: message.text == "📬 Непрочитанные")
 def handle_unread_button(message):
-    if message.chat.id not in ADMIN_IDS:
+    if not can_answer_support(message.chat.id):
         return
     requests = get_unread_requests()
     if not requests:
@@ -577,7 +745,7 @@ def handle_unread_button(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
 def handle_ans_callback(call):
-    if call.message.chat.id not in ADMIN_IDS:
+    if not can_answer_support(call.message.chat.id):
         bot.answer_callback_query(call.id, "❌ Нет доступа.")
         return
     parts = call.data.split("_")
@@ -593,11 +761,12 @@ def handle_ans_callback(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("close_"))
 def handle_close_callback(call):
-    if call.message.chat.id not in ADMIN_IDS:
+    if not can_answer_support(call.message.chat.id):
         bot.answer_callback_query(call.id, "❌ Нет доступа.")
         return
     req_id = int(call.data.split("_")[1])
     mark_request_answered(req_id)
+    delete_other_admin_alerts(req_id, call.message.chat.id)
     bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.answer_callback_query(call.id, f"✅ Обращение №{req_id} закрыто.")
 
@@ -607,7 +776,6 @@ def process_admin_answer_req(message, target_user_id, req_id):
         return
     try:
         admin_nickname = get_nickname(message.chat.id) or "Администратор"
-        # Получаем данные обращения для лога
         conn = sqlite3.connect("bot_stats.db", timeout=5)
         cursor = conn.cursor()
         cursor.execute("SELECT nickname, question, date FROM support_requests WHERE id = ?", (req_id,))
@@ -616,15 +784,17 @@ def process_admin_answer_req(message, target_user_id, req_id):
         player_nick = row[0] if row else "Неизвестно"
         question_text = row[1] if row else "—"
         req_date = row[2] if row else "—"
+        # Отправляем ответ пользователю БЕЗ ника админа
         bot.send_message(
             target_user_id,
             f"✉️ <b>Получен ответ от администрации на ваше обращение №{req_id}:</b>\n\n"
-            f"👤 <b>Администратор:</b> <code>{admin_nickname}</code>\n"
             f"💬 {message.text}",
             parse_mode="HTML"
         )
+        # В лог пишем ник администратора
         log_support_answer(req_id, player_nick, question_text, admin_nickname, message.text, req_date)
         mark_request_answered(req_id)
+        delete_other_admin_alerts(req_id, message.chat.id)
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except Exception:
@@ -646,7 +816,6 @@ def process_admin_answer_req(message, target_user_id, req_id):
 
 # ====== ТЕХ ПОДДЕРЖКА ======
 def send_admin_support_panel(chat_id):
-    """Показывает список необработанных обращений и просит ввести номер + ответ."""
     requests = get_unread_requests()
     if not requests:
         bot.send_message(chat_id, "✅ <b>Непрочитанных обращений нет.</b>", parse_mode="HTML")
@@ -670,9 +839,8 @@ def send_admin_support_panel(chat_id):
     bot.register_next_step_handler(msg, process_admin_reply_input)
 
 def process_admin_reply_input(message):
-    if message.chat.id not in ADMIN_IDS:
+    if not can_answer_support(message.chat.id):
         return
-    # Отмена если нажали кнопку меню
     if message.text in ["🌐 Онлайн", "🔗 Полезные ссылки", "🎫 Тех поддержка",
                         "📊 Статистика", "📢 Рассылка", "📬 Непрочитанные", "📋 Помощь"]:
         bot.send_message(message.chat.id, "❌ Ввод ответа отменён.")
@@ -692,7 +860,6 @@ def process_admin_reply_input(message):
     req_id = int(parts[0])
     answer_text = parts[1]
 
-    # Ищем обращение в БД
     conn = sqlite3.connect("bot_stats.db", timeout=5)
     cursor = conn.cursor()
     cursor.execute(
@@ -716,7 +883,7 @@ def process_admin_reply_input(message):
     if status == "answered":
         msg = bot.send_message(
             message.chat.id,
-            f"⚠️ Обращение №{req_id} уже было закрыто. Введите другой номер или отправьте сообщение из меню:",
+            f"⚠️ Обращение №{req_id} уже было закрыто. Введите другой номер:",
             parse_mode="HTML"
         )
         bot.register_next_step_handler(msg, process_admin_reply_input)
@@ -724,15 +891,17 @@ def process_admin_reply_input(message):
 
     try:
         admin_nickname = get_nickname(message.chat.id) or "Администратор"
+        # Ответ пользователю — без ника администратора
         bot.send_message(
             target_user_id,
             f"✉️ <b>Получен ответ от администрации на ваше обращение №{req_id}:</b>\n\n"
-            f"👤 <b>Администратор:</b> <code>{admin_nickname}</code>\n"
             f"💬 {answer_text}",
             parse_mode="HTML"
         )
+        # В лог — с ником администратора
         log_support_answer(req_id, nickname, question_text, admin_nickname, answer_text, req_date)
         mark_request_answered(req_id)
+        delete_other_admin_alerts(req_id, message.chat.id)
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except Exception:
@@ -757,11 +926,27 @@ def process_admin_reply_input(message):
             parse_mode="HTML"
         )
         mark_request_answered(req_id)
+        delete_other_admin_alerts(req_id, message.chat.id)
 
 @bot.message_handler(func=lambda message: message.text == "🎫 Тех поддержка")
 def handle_support_button(message):
-    if message.chat.id in ADMIN_IDS:
+    if can_answer_support(message.chat.id):
         send_admin_support_panel(message.chat.id)
+    elif is_admin(message.chat.id):
+        # Уровень 1 — только просматривает обращения
+        requests = get_unread_requests()
+        if not requests:
+            bot.send_message(message.chat.id, "✅ <b>Непрочитанных обращений нет.</b>", parse_mode="HTML")
+            return
+        lines = [f"📬 <b>Текущие обращения ({len(requests)}):</b>\n"]
+        for i, req in enumerate(requests, start=1):
+            req_id, user_id, nickname, username, question, date = req
+            preview = question if len(question) <= 60 else question[:60] + "…"
+            lines.append(
+                f"<b>{i}.</b> №{req_id} | 🎮 <code>{nickname}</code> | {date}\n"
+                f"    ❓ {preview}"
+            )
+        bot.send_message(message.chat.id, "\n".join(lines), parse_mode="HTML")
     else:
         msg = bot.send_message(
             message.chat.id,
@@ -791,18 +976,21 @@ def process_support_question(message):
         f"📝 <b>Вопрос:</b>\n{message.text}"
     )
 
+    sent_msgs = []
     for admin_id in ADMIN_IDS:
         try:
-            bot.send_message(admin_id, admin_alert, reply_markup=markup, parse_mode="HTML")
+            sent = bot.send_message(admin_id, admin_alert, reply_markup=markup, parse_mode="HTML")
+            sent_msgs.append((admin_id, sent.message_id))
         except Exception:
             pass
+    _admin_alert_msgs[req_id] = sent_msgs
 
     bot.send_message(user_id, "✅ <b>Ваш вопрос успешно отправлен администрации!</b> Ожидайте ответа.", parse_mode="HTML")
 
-# ====== РАССЫЛКА ======
+# ====== РАССЫЛКА (только уровень 3) ======
 @bot.message_handler(func=lambda message: message.text == "📢 Рассылка")
 def handle_broadcast_button(message):
-    if message.chat.id not in ADMIN_IDS:
+    if not can_broadcast(message.chat.id):
         return
     msg = bot.send_message(
         message.chat.id,
@@ -849,7 +1037,6 @@ def process_broadcast_text(message):
     bot.send_message(message.chat.id, report_text, parse_mode="HTML")
 
 def start_polling():
-    """Запускает один поток polling. non_stop=False — чтобы исключения выходили наружу."""
     def _poll():
         while True:
             try:
@@ -874,7 +1061,6 @@ if __name__ == "__main__":
     keep_alive()
     print("Запуск бота...")
 
-    # Сбрасываем вебхук и даём Telegram время закрыть старые соединения
     for attempt in range(5):
         try:
             bot.remove_webhook()
@@ -884,7 +1070,6 @@ if __name__ == "__main__":
             print(f"Ошибка сброса вебхука ({attempt + 1}/5): {e}")
             time.sleep(3)
 
-    # Пауза, чтобы старый процесс успел завершить свои long-poll запросы
     time.sleep(5)
 
     print("Бот успешно запущен и готов к работе!")
