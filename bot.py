@@ -5,7 +5,6 @@ import threading
 import sqlite3
 import telebot
 from telebot import types
-from samp_client.client import SampClient
 from keep_alive import keep_alive
 
 try:
@@ -28,7 +27,21 @@ socket.setdefaulttimeout(5)
 
 # Безопасное чтение переменных окружения для деплоя
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-DB_PATH = os.environ.get("DB_PATH", "bot_stats.db")
+
+# Безопасное определение пути к базе данных (исправление ошибки unable to open database file)
+raw_db_path = os.environ.get("DB_PATH", "bot_stats.db").strip()
+if raw_db_path.endswith("/") or raw_db_path.endswith("\\"):
+    DB_PATH = os.path.join(raw_db_path, "bot_stats.db")
+else:
+    DB_PATH = raw_db_path
+
+# Если путь содержит директории, убедимся, что они существуют
+db_dir = os.path.dirname(DB_PATH)
+if db_dir and not os.path.exists(db_dir):
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+    except Exception:
+        DB_PATH = "bot_stats.db"
 
 # Защита от ошибок сборки на Railway (инициализируем бота только при наличии токена)
 bot = None
@@ -38,7 +51,13 @@ if TOKEN:
 
 # ===================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =====================
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Ошибка открытия БД по пути {DB_PATH}: {e}. Переключаюсь на локальный файл.")
+        globals()['DB_PATH'] = "bot_stats.db"
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
