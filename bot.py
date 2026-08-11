@@ -25,7 +25,7 @@ def init_db():
     c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, nickname TEXT, join_date TEXT, username TEXT, position TEXT DEFAULT 'Игрок', level INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, level INTEGER DEFAULT 1, position TEXT DEFAULT 'Администратор')")
     c.execute("CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, content TEXT NOT NULL, author TEXT, date TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS support_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nickname TEXT, username TEXT, question TEXT, status TEXT DEFAULT 'unread', date TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS support_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nickname TEXT, username TEXT, question TEXT, status TEXT DEFAULT 'unread', date TEXT, admin_reply TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS leaders (id INTEGER PRIMARY KEY AUTOINCREMENT, fraction TEXT NOT NULL, nickname TEXT NOT NULL, username TEXT, date TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS transfer_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,14 +123,6 @@ def get_all_users():
     rows = c.fetchall()
     conn.close()
     return [r[0] for r in rows]
-
-def get_unread_count():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM support_requests WHERE status = 'unread'")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
 
 def news_get_all():
     conn = sqlite3.connect(DB_PATH)
@@ -331,7 +323,7 @@ def change_nick(message):
     set_nickname(message.chat.id, nick)
     bot.send_message(message.chat.id, f"✅ Ник изменен на {nick}!")
 
-# ===================== ТЕХПОДДЕРЖКА (ИСПРАВЛЕНО) =====================
+# ===================== ТЕХПОДДЕРЖКА (НОВАЯ ЛОГИКА) =====================
 @bot.message_handler(func=lambda message: message.text == "🎫 Тех поддержка")
 def support_start(message):
     uid = message.chat.id
@@ -349,7 +341,6 @@ def support_send(message):
     nickname = get_nickname(uid) or "Не указан"
     username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
     
-    # Сохраняем в БД
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     date = time.strftime("%d.%m.%Y %H:%M")
@@ -358,7 +349,10 @@ def support_send(message):
     conn.commit()
     conn.close()
 
-    # Отправляем админам
+    # Кнопка для админа
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📝 Ответить", callback_data=f"supp_reply_{req_id}_{uid}"))
+
     admin_text = (
         f"🆘 <b>НОВОЕ ОБРАЩЕНИЕ В ТЕХПОДДЕРЖКУ №{req_id}</b>\n\n"
         f"👤 <b>Игрок:</b> {nickname}\n"
@@ -370,11 +364,114 @@ def support_send(message):
     
     for admin_id in ADMIN_IDS:
         try:
-            bot.send_message(admin_id, admin_text, parse_mode="HTML")
+            bot.send_message(admin_id, admin_text, reply_markup=markup, parse_mode="HTML")
         except:
             pass
 
     bot.send_message(uid, f"✅ Ваше обращение №{req_id} отправлено администрации! Ожидайте ответа.", reply_markup=main_kb(uid))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("supp_reply_"))
+def support_reply_start(call):
+    admin_id = call.message.chat.id
+    if admin_id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа!", show_alert=True)
+        return
+    
+    parts = call.data.split("_")
+    req_id = int(parts[2])
+    user_id = int(parts[3])
+    
+    msg = bot.send_message(admin_id, f"✍️ Введите ответ для игрока (заявка №{req_id}):")
+    bot.register_next_step_handler(msg, support_reply_send, req_id, user_id, call.message)
+    bot.answer_callback_query(call.id)
+
+def support_reply_send(message, req_id, user_id, admin_msg):
+    admin_id = message.chat.id
+    reply_text = message.text.strip()
+    
+    # Обновляем БД и закрываем заявку
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE support_requests SET status = 'answered', admin_reply = ? WHERE id = ?", (reply_text, req_id))
+    conn.commit()
+    conn.close()
+    
+    # Отправляем ответ игроку
+    try:
+        bot.send_message(user_id, f"📩 <b>Ответ администрации на заявку №{req_id}:</b>\n\n{reply_text}", parse_mode="HTML")
+        bot.send_message(admin_id, f"✅ Ответ отправлен игроку!")
+    except Exception as e:
+        bot.send_message(admin_id, f"❌ Ошибка при отправке игроку: {e}")
+    
+    # Удаляем сообщение с заявкой у админа (чтобы не засорять чат)
+    try:
+        bot.delete_message(admin_msg.chat.id, admin_msg.message_id)
+    except:
+        pass
+
+# ===================== НЕПРОЧИТАННЫЕ (ЛИСТ ВОПРОСОВ) =====================
+@bot.message_handler(func=lambda message: message.text == "📬 Непрочитанные")
+def unread_list(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, nickname, question, date FROM support_requests WHERE status = 'unread' ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(uid, "📭 Нет непрочитанных обращений.", reply_markup=main_kb(uid))
+        return
+
+    text = "📬 <b>Список непрочитанных обращений:</b>\n\n"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    for req_id, nick, q, date in rows:
+        # Короткий текст вопроса (не больше 20 символов)
+        short_q = q[:20] + "..." if len(q) > 20 else q
+        text += f"▪️ #{req_id} | {nick} | {date}\n"
+        markup.add(types.InlineKeyboardButton(f"#{req_id} - {short_q}", callback_data=f"supp_view_{req_id}"))
+
+    bot.send_message(uid, text, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("supp_view_"))
+def support_view(call):
+    admin_id = call.message.chat.id
+    if admin_id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа!", show_alert=True)
+        return
+    
+    req_id = int(call.data.split("_")[2])
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, nickname, username, question, date FROM support_requests WHERE id = ?", (req_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        bot.answer_callback_query(call.id, "❌ Заявка не найдена!", show_alert=True)
+        return
+        
+    user_id, nick, username, question, date = row
+    
+    text = (
+        f"📋 <b>Заявка №{req_id}</b>\n\n"
+        f"👤 {nick}\n"
+        f"🆔 <code>{user_id}</code>\n"
+        f"📱 @{username}\n"
+        f"📅 {date}\n\n"
+        f"<b>Вопрос:</b>\n{question}"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📝 Ответить", callback_data=f"supp_reply_{req_id}_{user_id}"))
+    
+    bot.edit_message_text(text, admin_id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    bot.answer_callback_query(call.id)
 
 # ===================== ПЕРЕНОС =====================
 def process_transfer_form(message):
@@ -542,7 +639,7 @@ def news_del_do(call):
 def handle_buttons(message):
     uid = message.chat.id
     text = message.text
-    if not text or text.startswith('/') or text == "🎫 Тех поддержка":
+    if not text or text.startswith('/') or text in ["🎫 Тех поддержка", "📬 Непрочитанные"]:
         return
     if not is_subscribed(uid):
         markup = types.InlineKeyboardMarkup()
@@ -565,9 +662,7 @@ def handle_buttons(message):
         msg = bot.send_message(uid, "📝 Введите данные по форме и прикрепите скриншот:")
         bot.register_next_step_handler(msg, process_transfer_form)
     elif uid in ADMIN_IDS:
-        if text == "📬 Непрочитанные":
-            bot.send_message(uid, f"📭 Непрочитанных заявок: {get_unread_count()}", reply_markup=main_kb(uid))
-        elif text == "📊 Статистика":
+        if text == "📊 Статистика":
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("SELECT COUNT(*) FROM users")
