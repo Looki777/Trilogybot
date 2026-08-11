@@ -29,7 +29,7 @@ DB_PATH = "bot_stats.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, nickname TEXT, join_date TEXT, username TEXT, position TEXT DEFAULT 'Игрок')")
+    c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, nickname TEXT, join_date TEXT, username TEXT, position TEXT DEFAULT 'Игрок', level INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, level INTEGER DEFAULT 1, position TEXT DEFAULT 'Администратор')")
     c.execute("CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, content TEXT NOT NULL, author TEXT, date TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS support_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nickname TEXT, username TEXT, question TEXT, status TEXT DEFAULT 'unread', date TEXT)")
@@ -49,10 +49,41 @@ def get_nickname(user_id):
     conn.close()
     return row[0] if row else None
 
+def get_username(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_position(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT position FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else "Игрок"
+
+def get_level(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT level FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
 def set_nickname(user_id, nick):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, nickname, join_date) VALUES (?, ?, ?)", (user_id, nick, time.strftime("%Y-%m-%d")))
+    c.execute("INSERT OR REPLACE INTO users (user_id, nickname, join_date, level) VALUES (?, ?, ?, 0)", (user_id, nick, time.strftime("%Y-%m-%d")))
+    conn.commit()
+    conn.close()
+
+def update_user_info(user_id, username):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
     conn.commit()
     conn.close()
 
@@ -118,10 +149,18 @@ def news_delete(news_id):
 def get_all_admins():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT user_id, level, position FROM admins ORDER BY level DESC")
+    c.execute("SELECT user_id, position FROM admins ORDER BY level DESC")
     rows = c.fetchall()
     conn.close()
     return rows
+
+def get_admin_level(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT level FROM admins WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 # ===================== КЛАВИАТУРА =====================
 MENU_BUTTONS = ["🌐 Онлайн", "🔗 Полезные ссылки", "📰 Новости сервера", "💼 Список лидеров", "🔄 Перенос аккаунта", "🎫 Тех поддержка", "📬 Непрочитанные", "📊 Статистика", "📢 Рассылка", "📋 Помощь"]
@@ -140,6 +179,10 @@ def main_kb(uid):
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     uid = message.chat.id
+    username = message.from_user.username
+    if username:
+        update_user_info(uid, username)
+    
     if not is_subscribed(uid):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("📢 Подписаться", url=CHANNEL_URL))
@@ -178,9 +221,12 @@ def admlist_cmd(message):
         bot.send_message(uid, "📭 Список админов пуст.")
         return
     text = "👑 <b>Список администраторов:</b>\n\n"
-    for user_id, level, position in admins:
+    for user_id, position in admins:
         nick = get_nickname(user_id) or str(user_id)
-        text += f"👤 {nick} | ID: {user_id} | Уровень: {level} | Должность: {position}\n"
+        username = get_username(user_id) or "Нет"
+        text += f"👤 <b>{nick}</b>\n"
+        text += f"   📋 Должность: {position}\n"
+        text += f"   📱 Юзернейм: @{username}\n\n"
     bot.send_message(uid, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['стата'])
@@ -190,7 +236,23 @@ def stata_cmd(message):
     if not nick:
         bot.send_message(uid, "❌ Сначала введите /start")
         return
-    bot.send_message(uid, f"📋 <b>Ваш профиль</b>\n\n🎮 Ник: {nick}\n🆔 ID: {uid}", parse_mode="HTML")
+    position = get_position(uid)
+    level = get_admin_level(uid) or get_level(uid) or 0
+    username = get_username(uid) or "Нет"
+    
+    # Уровни
+    level_names = {0: "🟢 Игрок", 1: "🟢 Модератор", 2: "🟡 Старший модератор", 3: "🔴 Главный администратор"}
+    level_text = level_names.get(level, f"Уровень {level}")
+    
+    text = (
+        f"📋 <b>Ваш профиль</b>\n\n"
+        f"🎮 <b>Никнейм:</b> {nick}\n"
+        f"🆔 <b>ID:</b> <code>{uid}</code>\n"
+        f"📱 <b>Юзернейм:</b> @{username}\n"
+        f"🎖️ <b>Должность:</b> {position}\n"
+        f"📊 <b>Уровень:</b> {level_text}"
+    )
+    bot.send_message(uid, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['ник'])
 def nick_cmd(message):
@@ -326,8 +388,10 @@ def handle_buttons(message):
             users = c.fetchone()[0]
             c.execute("SELECT COUNT(*) FROM admins")
             admins = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM news")
+            news_count = c.fetchone()[0]
             conn.close()
-            bot.send_message(uid, f"📊 <b>Статистика</b>\n\n👤 Пользователей: {users}\n👑 Админов: {admins}", parse_mode="HTML", reply_markup=main_kb(uid))
+            bot.send_message(uid, f"📊 <b>Статистика</b>\n\n👤 Пользователей: {users}\n👑 Админов: {admins}\n📰 Новостей: {news_count}", parse_mode="HTML", reply_markup=main_kb(uid))
 
         elif text == "📢 Рассылка":
             msg = bot.send_message(uid, "📨 Введите текст для рассылки:")
@@ -335,17 +399,26 @@ def handle_buttons(message):
 
         elif text == "📋 Помощь":
             help_text = (
-                "📋 <b>Команды администратора</b>\n\n"
-                "/admlist — список администрации\n"
-                "/стата — ваш профиль\n"
-                "/ник — сменить ник\n\n"
-                "🔘 Кнопки:\n"
-                "🌐 Онлайн — статус сервера\n"
-                "🔗 Ссылки — ресурсы\n"
-                "📰 Новости — управление новостями\n"
-                "📬 Непрочитанные — обращения\n"
-                "📊 Статистика — статистика\n"
-                "📢 Рассылка — рассылка"
+                "📋 <b>Команды Главного Модератора:</b>\n\n"
+                "👤 <b>Управление администрацией</b>\n"
+                "/админ ID уровень — выдать права (1/2/3)\n"
+                "/разадмин ID — снять права администратора\n"
+                "/должность ID Должность — изменить должность\n"
+                "/admlist — список всей администрации бота\n\n"
+                "🎮 <b>Профиль</b>\n"
+                "/стата — посмотреть свой профиль\n"
+                "/ник — сменить свой никнейм\n"
+                "/лог — скачать историю ответов тех. поддержки\n\n"
+                "🔘 <b>Кнопки меню</b>\n"
+                "🌐 Онлайн — статус SA:MP сервера\n"
+                "🔗 Полезные ссылки — официальные ресурсы проекта\n"
+                "📰 Новости сервера — просмотр и управление новостями\n"
+                "💼 Список лидеров — список лидеров организаций\n"
+                "🔄 Перенос аккаунта — подача заявки на перенос\n"
+                "🎫 Тех поддержка — создание обращения в поддержку\n"
+                "📬 Непрочитанные — просмотр необработанных обращений\n"
+                "📊 Статистика — количество пользователей и обращений\n"
+                "📢 Рассылка — отправить сообщение всем пользователям"
             )
             bot.send_message(uid, help_text, parse_mode="HTML", reply_markup=main_kb(uid))
 
