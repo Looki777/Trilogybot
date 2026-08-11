@@ -130,6 +130,10 @@ def run_bot():
         if not text:
             return
             
+        # Проверяем, не является ли сообщение командой /start
+        if text.startswith('/start'):
+            return  # Пропускаем, чтобы обработал другой хендлер
+            
         if not is_subscribed(uid):
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("📢 Подписаться", url=CHANNEL_URL))
