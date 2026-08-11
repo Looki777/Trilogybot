@@ -80,12 +80,28 @@ def set_nickname(user_id, nick):
     conn.commit()
     conn.close()
 
+def set_position(user_id, position):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET position = ? WHERE user_id = ?", (position, user_id))
+    conn.commit()
+    conn.close()
+
 def update_user_info(user_id, username):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
     conn.commit()
     conn.close()
+
+def get_user_by_username(username):
+    username = username.lstrip("@").lower()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, nickname, position FROM users WHERE LOWER(username) = ?", (username,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
 def is_subscribed(user_id):
     try:
@@ -162,6 +178,53 @@ def get_admin_level(user_id):
     conn.close()
     return row[0] if row else 0
 
+# ===================== ДОСТУПНЫЕ ДОЛЖНОСТИ =====================
+AVAILABLE_POSITIONS = [
+    "Игрок",
+    "Хелпер",
+    "Модератор",
+    "Куратор",
+    "Следящий за Гос",
+    "Следящий за Гетто",
+    "Следящий за Мафиями",
+    "Следящий за АП",
+    "Следящий за Хелперами",
+    "ЗГС Гос",
+    "ЗГС Гетто",
+    "ЗГС Мафий",
+    "ЗГС АП",
+    "ЗГС Хелперов",
+    "ГС Гос",
+    "ГС Гетто",
+    "ГС Мафий",
+    "ГС АП",
+    "ГС Хелперов",
+    "Зам. Главного администратора",
+    "Главный администратор",
+    "Спец. проект",
+    "Основатель",
+    "Разработчик"
+]
+
+def get_positions_list():
+    text = "📋 <b>Доступные должности:</b>\n\n"
+    groups = [
+        ("👤 Игроки", ["Игрок"]),
+        ("🙋‍♂️ Помощь", ["Хелпер"]),
+        ("🛡️ Модерация", ["Модератор", "Куратор"]),
+        ("🔎 Следящие", ["Следящий за Гос", "Следящий за Гетто", "Следящий за Мафиями", "Следящий за АП", "Следящий за Хелперами"]),
+        ("⚜️ Заместители ГС", ["ЗГС Гос", "ЗГС Гетто", "ЗГС Мафий", "ЗГС АП", "ЗГС Хелперов"]),
+        ("⚡ Главные следящие", ["ГС Гос", "ГС Гетто", "ГС Мафий", "ГС АП", "ГС Хелперов"]),
+        ("👑 Администрация", ["Зам. Главного администратора", "Главный администратор"]),
+        ("💻 Разработка", ["Спец. проект", "Основатель", "Разработчик"])
+    ]
+    for group_name, positions in groups:
+        text += f"<b>{group_name}:</b>\n"
+        for pos in positions:
+            text += f"   • {pos}\n"
+        text += "\n"
+    return text
+
 # ===================== КЛАВИАТУРА =====================
 MENU_BUTTONS = ["🌐 Онлайн", "🔗 Полезные ссылки", "📰 Новости сервера", "💼 Список лидеров", "🔄 Перенос аккаунта", "🎫 Тех поддержка", "📬 Непрочитанные", "📊 Статистика", "📢 Рассылка", "📋 Помощь"]
 
@@ -209,7 +272,96 @@ def check_sub(call):
     else:
         bot.answer_callback_query(call.id, "❌ Вы не подписаны!", show_alert=True)
 
-# ===================== КОМАНДЫ =====================
+# ===================== КОМАНДА /ДОЛЖНОСТЬ =====================
+@bot.message_handler(commands=['должность'])
+def position_cmd(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        bot.send_message(uid, "❌ Только для администраторов!")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            bot.send_message(uid, 
+                "❌ <b>Неверный формат!</b>\n\n"
+                "📋 <b>Использование:</b>\n"
+                "<code>/должность @username Должность</code>\n\n"
+                "📌 <b>Пример:</b>\n"
+                "<code>/должность @john_doe Модератор</code>\n\n"
+                "📋 <b>Список доступных должностей:</b>\n"
+                "Отправьте команду <code>/должности</code> для просмотра.",
+                parse_mode="HTML"
+            )
+            return
+        
+        username = parts[1].strip()
+        new_position = parts[2].strip()
+        
+        if new_position not in AVAILABLE_POSITIONS:
+            bot.send_message(uid, 
+                f"❌ <b>Должность «{new_position}» не найдена!</b>\n\n"
+                f"📋 <b>Доступные должности:</b>\n"
+                f"Отправьте команду <code>/должности</code> для просмотра.",
+                parse_mode="HTML"
+            )
+            return
+        
+        user_data = get_user_by_username(username)
+        if not user_data:
+            bot.send_message(uid, 
+                f"❌ <b>Пользователь {username} не найден!</b>\n\n"
+                f"📌 Убедитесь, что пользователь:\n"
+                f"• Зарегистрирован в боте (/start)\n"
+                f"• Указал свой юзернейм в Telegram",
+                parse_mode="HTML"
+            )
+            return
+        
+        target_id, target_nick, current_pos = user_data
+        set_position(target_id, new_position)
+        
+        bot.send_message(uid, 
+            f"✅ <b>Должность успешно изменена!</b>\n\n"
+            f"👤 <b>Игрок:</b> {target_nick}\n"
+            f"📱 <b>Юзернейм:</b> {username}\n"
+            f"📋 <b>Новая должность:</b> {new_position}\n"
+            f"📌 <b>Старая должность:</b> {current_pos}",
+            parse_mode="HTML"
+        )
+        
+        try:
+            bot.send_message(target_id,
+                f"📋 <b>Ваша должность была изменена!</b>\n\n"
+                f"📌 <b>Новая должность:</b> {new_position}\n"
+                f"👤 <b>Кем изменено:</b> Администрацией проекта",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+            
+    except Exception as e:
+        bot.send_message(uid, 
+            f"❌ <b>Ошибка!</b>\n\n"
+            f"📋 <b>Использование:</b>\n"
+            f"<code>/должность @username Должность</code>\n\n"
+            f"📌 <b>Пример:</b>\n"
+            f"<code>/должность @john_doe Модератор</code>\n\n"
+            f"📋 <b>Список доступных должностей:</b>\n"
+            f"Отправьте команду <code>/должности</code> для просмотра.",
+            parse_mode="HTML"
+        )
+
+# ===================== КОМАНДА /ДОЛЖНОСТИ (СПИСОК) =====================
+@bot.message_handler(commands=['должности'])
+def positions_list_cmd(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        bot.send_message(uid, "❌ Только для администраторов!")
+        return
+    bot.send_message(uid, get_positions_list(), parse_mode="HTML")
+
+# ===================== КОМАНДА /ADMLIST =====================
 @bot.message_handler(commands=['admlist'])
 def admlist_cmd(message):
     uid = message.chat.id
@@ -222,13 +374,14 @@ def admlist_cmd(message):
         return
     text = "👑 <b>Список администраторов:</b>\n\n"
     for user_id, position in admins:
-        nick = get_nickname(user_id) or str(user_id)
+        nick = get_nickname(user_id) or "Не указан"
         username = get_username(user_id) or "Нет"
         text += f"👤 <b>{nick}</b>\n"
-        text += f"   📋 Должность: {position}\n"
-        text += f"   📱 Юзернейм: @{username}\n\n"
+        text += f"   📱 Юзернейм: @{username}\n"
+        text += f"   📋 Должность: {position}\n\n"
     bot.send_message(uid, text, parse_mode="HTML")
 
+# ===================== КОМАНДЫ /СТАТА, /НИК =====================
 @bot.message_handler(commands=['стата'])
 def stata_cmd(message):
     uid = message.chat.id
@@ -240,7 +393,6 @@ def stata_cmd(message):
     level = get_admin_level(uid) or get_level(uid) or 0
     username = get_username(uid) or "Нет"
     
-    # Уровни
     level_names = {0: "🟢 Игрок", 1: "🟢 Модератор", 2: "🟡 Старший модератор", 3: "🔴 Главный администратор"}
     level_text = level_names.get(level, f"Уровень {level}")
     
@@ -354,15 +506,28 @@ def handle_buttons(message):
     if text == "🌐 Онлайн":
         bot.send_message(uid, get_online(), reply_markup=main_kb(uid))
 
-    # ===== ССЫЛКИ =====
+    # ===== ПОЛЕЗНЫЕ ССЫЛКИ (С ВК) =====
     elif text == "🔗 Полезные ссылки":
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
-            types.InlineKeyboardButton("📢 Канал", url=CHANNEL_URL),
-            types.InlineKeyboardButton("💬 Чат", url="https://t.me/santropetrilogy_chat"),
-            types.InlineKeyboardButton("📱 ВК", url="https://vk.com/santropetrilogy")
+            types.InlineKeyboardButton("📢 Telegram-канал проекта", url="https://t.me/santrope_trilogyrp"),
+            types.InlineKeyboardButton("🌐 Официальный форум", url="https://wh32893.web3.maze-tech.ru/index.php"),
+            types.InlineKeyboardButton("📱 Группа ВКонтакте", url="https://vk.com/santropetrilogy")
         )
-        bot.send_message(uid, "🔗 Ресурсы:", reply_markup=markup)
+        text_msg = (
+            "🔗 <b>Официальные ресурсы проекта</b>\n\n"
+            "📢 <b>Telegram-канал</b>\n"
+            "Главные новости, анонсы и объявления.\n\n"
+            "🌐 <b>Форум проекта</b>\n"
+            "Правила, заявки, обсуждения и полезная информация.\n"
+            "▫️ Игровые разделы\n"
+            "▫️ Техническая поддержка\n"
+            "▫️ Общение и предложения\n\n"
+            "📱 <b>Группа ВКонтакте</b>\n"
+            "Новости проекта и общение с игроками.\n\n"
+            "👇 <i>Выберите нужный ресурс:</i>"
+        )
+        bot.send_message(uid, text_msg, reply_markup=markup, parse_mode="HTML")
 
     # ===== ЛИДЕРЫ =====
     elif text == "💼 Список лидеров":
@@ -403,7 +568,8 @@ def handle_buttons(message):
                 "👤 <b>Управление администрацией</b>\n"
                 "/админ ID уровень — выдать права (1/2/3)\n"
                 "/разадмин ID — снять права администратора\n"
-                "/должность ID Должность — изменить должность\n"
+                "/должность @username Должность — изменить должность\n"
+                "/должности — список всех доступных должностей\n"
                 "/admlist — список всей администрации бота\n\n"
                 "🎮 <b>Профиль</b>\n"
                 "/стата — посмотреть свой профиль\n"
