@@ -5,6 +5,24 @@ import telebot
 from telebot import types
 from keep_alive import keep_alive
 
+# ===================== ПОДКЛЮЧЕНИЕ SAMP (АВТОМАТИЧЕСКОЕ) =====================
+samp_ready = False
+try:
+    from samp_client.client import SampClient
+    samp_ready = True
+except ImportError:
+    # Если библиотеки нет - пробуем установить прямо перед запуском бота
+    print("🔄 Библиотека samp-client не найдена. Попытка установки...")
+    try:
+        import subprocess
+        subprocess.check_call([os.sys.executable, "-m", "pip", "install", "samp-client"])
+        from samp_client.client import SampClient
+        samp_ready = True
+        print("✅ Библиотека samp-client успешно установлена!")
+    except Exception as e:
+        print(f"❌ Не удалось установить библиотеку: {e}")
+
+# ===================== ПЕРЕМЕННЫЕ =====================
 SERVER_IP = "54.38.117.76"
 SERVER_PORT = 1321
 REQUIRED_CHANNEL = "@santropetrilogybot_news"
@@ -113,8 +131,18 @@ def is_subscribed(user_id):
     except:
         return True
 
+# ===================== ОНЛАЙН (ВОЗВРАЩЕН) =====================
 def get_online():
-    return "❌ Онлайн недоступен (библиотека не установлена)"
+    if not samp_ready:
+        return "❌ Библиотека SAMP не загрузилась. Перезапустите бота."
+    try:
+        client = SampClient(SERVER_IP, SERVER_PORT)
+        info = client.get_server_info()
+        if info:
+            return f"🎮 {info.hostname}\n\n🌐 {SERVER_IP}:{SERVER_PORT}\n👥 Онлайн: {info.players}/{info.max_players}\n🟢 Статус: Работает"
+        return "❌ Сервер не отвечает"
+    except Exception as e:
+        return f"❌ Ошибка подключения к серверу: {e}"
 
 def get_all_users():
     conn = sqlite3.connect(DB_PATH)
@@ -323,7 +351,7 @@ def change_nick(message):
     set_nickname(message.chat.id, nick)
     bot.send_message(message.chat.id, f"✅ Ник изменен на {nick}!")
 
-# ===================== ТЕХПОДДЕРЖКА (НОВАЯ ЛОГИКА) =====================
+# ===================== ТЕХПОДДЕРЖКА =====================
 @bot.message_handler(func=lambda message: message.text == "🎫 Тех поддержка")
 def support_start(message):
     uid = message.chat.id
@@ -349,7 +377,6 @@ def support_send(message):
     conn.commit()
     conn.close()
 
-    # Кнопка для админа
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📝 Ответить", callback_data=f"supp_reply_{req_id}_{uid}"))
 
@@ -389,27 +416,24 @@ def support_reply_send(message, req_id, user_id, admin_msg):
     admin_id = message.chat.id
     reply_text = message.text.strip()
     
-    # Обновляем БД и закрываем заявку
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE support_requests SET status = 'answered', admin_reply = ? WHERE id = ?", (reply_text, req_id))
     conn.commit()
     conn.close()
     
-    # Отправляем ответ игроку
     try:
         bot.send_message(user_id, f"📩 <b>Ответ администрации на заявку №{req_id}:</b>\n\n{reply_text}", parse_mode="HTML")
         bot.send_message(admin_id, f"✅ Ответ отправлен игроку!")
     except Exception as e:
         bot.send_message(admin_id, f"❌ Ошибка при отправке игроку: {e}")
     
-    # Удаляем сообщение с заявкой у админа (чтобы не засорять чат)
     try:
         bot.delete_message(admin_msg.chat.id, admin_msg.message_id)
     except:
         pass
 
-# ===================== НЕПРОЧИТАННЫЕ (ЛИСТ ВОПРОСОВ) =====================
+# ===================== НЕПРОЧИТАННЫЕ =====================
 @bot.message_handler(func=lambda message: message.text == "📬 Непрочитанные")
 def unread_list(message):
     uid = message.chat.id
@@ -430,7 +454,6 @@ def unread_list(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     
     for req_id, nick, q, date in rows:
-        # Короткий текст вопроса (не больше 20 символов)
         short_q = q[:20] + "..." if len(q) > 20 else q
         text += f"▪️ #{req_id} | {nick} | {date}\n"
         markup.add(types.InlineKeyboardButton(f"#{req_id} - {short_q}", callback_data=f"supp_view_{req_id}"))
