@@ -20,14 +20,12 @@ ADMIN_LEVELS = {}
 bot = None
 
 def get_db_path():
-    # Возвращает путь к БД, берет из окружения или ставит дефолт
     return os.environ.get("DB_PATH", "bot_stats.db")
 
 def init_db():
     path = get_db_path()
     conn = sqlite3.connect(path, timeout=10)
     cursor = conn.cursor()
-    # Создаем таблицы (включая лидеров)
     tables = [
         "users (user_id INTEGER PRIMARY KEY, username TEXT, nickname TEXT, position TEXT DEFAULT 'Игрок', join_date TEXT)",
         "server_stats (id INTEGER PRIMARY KEY, peak_online INTEGER DEFAULT 0, peak_date TEXT, peak_day TEXT, last_restart TEXT)",
@@ -43,12 +41,10 @@ def init_db():
     
     cursor.execute("INSERT OR IGNORE INTO server_stats (id) VALUES (1)")
     
-    # Миграции (добавляем колонки если их нет)
     for col in [("nickname", "TEXT"), ("position", "TEXT DEFAULT 'Игрок'")]:
         try: cursor.execute(f"ALTER TABLE users ADD COLUMN {col[0]} {col[1]}")
         except: pass
         
-    # Синхронизация админов
     for aid in list(ADMIN_IDS):
         cursor.execute("INSERT OR IGNORE INTO admins (user_id, level) VALUES (?, 3)", (aid,))
     conn.commit()
@@ -59,13 +55,12 @@ def init_db():
         ADMIN_LEVELS[row[0]] = row[1]
     conn.close()
 
-# --- Вспомогательные функции ---
 def is_subscribed(user_id):
-    if not bot: return True
     try:
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except: return True
+    except:
+        return True
 
 def get_nickname(uid):
     conn = sqlite3.connect(get_db_path())
@@ -84,8 +79,6 @@ def main_kb(uid):
         m.row("📬 Непрочитанные", "📊 Статистика")
         m.row("📢 Рассылка", "📋 Помощь")
     return m
-
-# --- Обработчики будут инициализированы в main ---
 
 def run_bot():
     global bot
@@ -128,8 +121,6 @@ def run_bot():
             bot.send_message(call.message.chat.id, "✅ Спасибо! Теперь используйте /start")
         else:
             bot.answer_callback_query(call.id, "❌ Вы не подписаны!", show_alert=True)
-
-    # Добавьте сюда остальные обработчики (Лидеры, Перенос и т.д.) по необходимости
 
     print("Бот запущен...")
     bot.polling(none_stop=True)
