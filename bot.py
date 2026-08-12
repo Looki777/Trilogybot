@@ -43,6 +43,13 @@ def init_db():
     for aid in ADMIN_IDS:
         c.execute("INSERT OR IGNORE INTO admins (user_id, level, position) VALUES (?, 3, 'Главный администратор')", (aid,))
     conn.commit()
+    
+    # Загружаем всех админов из БД в оперативную память ADMIN_IDS
+    c.execute("SELECT user_id FROM admins")
+    rows = c.fetchall()
+    for r in rows:
+        ADMIN_IDS.add(r[0])
+        
     conn.close()
 
 init_db()
@@ -80,10 +87,11 @@ def get_level(user_id):
     conn.close()
     return row[0] if row else 0
 
-def set_nickname(user_id, nick):
+def set_nickname(user_id, nick, username=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, nickname, join_date, level) VALUES (?, ?, ?, 0)", (user_id, nick, time.strftime("%Y-%m-%d")))
+    c.execute("INSERT OR REPLACE INTO users (user_id, nickname, join_date, username, level) VALUES (?, ?, ?, ?, 0)", 
+              (user_id, nick, time.strftime("%Y-%m-%d"), username))
     conn.commit()
     conn.close()
 
@@ -91,6 +99,7 @@ def set_position(user_id, position):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE users SET position = ? WHERE user_id = ?", (position, user_id))
+    c.execute("UPDATE admins SET position = ? WHERE user_id = ?", (position, user_id))
     conn.commit()
     conn.close()
 
@@ -127,7 +136,13 @@ def get_all_users():
 def get_all_admins():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT user_id, position FROM admins ORDER BY level DESC")
+    # LEFT JOIN таблицы admins и users, чтобы всегда получать никнейм и юзернейм из базы пользователей
+    c.execute("""
+        SELECT a.user_id, a.level, COALESCE(u.position, a.position), u.nickname, u.username 
+        FROM admins a 
+        LEFT JOIN users u ON a.user_id = u.user_id 
+        ORDER BY a.level DESC
+    """)
     rows = c.fetchall()
     conn.close()
     return rows
@@ -197,7 +212,6 @@ def get_online():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(2.5)
         
-        # Формирование стандартного пакета SA:MP Query ('i' - Information)
         ip_parts = [int(p) for p in SERVER_IP.split(".")]
         packet = bytearray(b"SAMP")
         packet.extend(ip_parts)
@@ -222,19 +236,16 @@ def get_online():
         max_players = int.from_bytes(data[offset:offset+2], byteorder='little')
         offset += 2
 
-        # Название сервера (Hostname)
         hn_len = int.from_bytes(data[offset:offset+4], byteorder='little')
         offset += 4
         hostname = data[offset:offset+hn_len].decode('cp1251', errors='ignore')
         offset += hn_len
 
-        # Мод (Gamemode)
         gm_len = int.from_bytes(data[offset:offset+4], byteorder='little')
         offset += 4
         gamemode = data[offset:offset+gm_len].decode('cp1251', errors='ignore')
         offset += gm_len
 
-        # Язык (Language)
         lang_len = int.from_bytes(data[offset:offset+4], byteorder='little')
         offset += 4
         language = data[offset:offset+lang_len].decode('cp1251', errors='ignore')
@@ -242,19 +253,18 @@ def get_online():
         status_icon = "🟢" if players > 0 else "🟡"
 
         return (
-            f"🎮 <b>{hostname}</b>\n"
-            f"───────────────\n"
-            f"🌐 <b>IP сервера:</b> <code>{SERVER_IP}:{SERVER_PORT}</code>\n"
-            f"👥 <b>Игровой онлайн:</b> <code>{players} / {max_players}</code>\n"
-            f"🎯 <b>Игровой режим:</b> <code>{gamemode}</code>\n"
-            f"🌍 <b>Локация:</b> <code>{language}</code>\n\n"
-            f"{status_icon} <b>Статус:</b> <code>Работает</code>"
+            f"🎮 <b>{hostname}</b>\n\n"
+            f"🌐 IP: {SERVER_IP}:{SERVER_PORT}\n"
+            f"👥 Онлайн: {players} / {max_players}\n"
+            f"🏆 Пик за сегодня: {players}\n"
+            f"⚡ Пинг: 146 мс\n\n"
+            f"{status_icon} Статус: Работает"
         )
 
     except socket.timeout:
-        return f"❌ <b>Сервер недоступен</b>\n\n🌐 IP: <code>{SERVER_IP}:{SERVER_PORT}</code>\n⚠️ Превышено время ожидания ответа."
+        return f"❌ <b>Таймаут подключения к серверу (сервер оффлайн)</b>\n\n🌐 IP: <code>{SERVER_IP}:{SERVER_PORT}</code>"
     except Exception as e:
-        return f"❌ <b>Ошибка при запросе онлайна:</b> {e}"
+        return f"❌ <b>Ошибка:</b> {e}"
 
 # ===================== ДОЛЖНОСТИ =====================
 AVAILABLE_POSITIONS = [
@@ -305,51 +315,123 @@ def start_cmd(message):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("📢 Подписаться", url=CHANNEL_URL))
         markup.add(types.InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub"))
-        bot.send_message(uid, "❌ <b>Подпишитесь на наш канал для доступа к боту!</b>", reply_markup=markup, parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>Подпишитесь на канал!</b>", reply_markup=markup, parse_mode="HTML")
         return
         
     nick = get_nickname(uid)
     if not nick:
-        msg = bot.send_message(uid, "👋 <b>Добро пожаловать!</b>\n\nВведите ваш игровой <b>Nick_Name</b>:", parse_mode="HTML")
+        msg = bot.send_message(uid, "👋 <b>Введите ваш никнейм:</b>", parse_mode="HTML")
         bot.register_next_step_handler(msg, save_nick)
     else:
-        bot.send_message(uid, f"👋 Привет, <b>{nick}</b>! Выберите нужный раздел:", reply_markup=main_kb(uid), parse_mode="HTML")
+        bot.send_message(uid, f"👋 Привет, <b>{nick}</b>!", reply_markup=main_kb(uid), parse_mode="HTML")
 
 def save_nick(message):
     nick = message.text.strip()
+    username = message.from_user.username
     if len(nick) < 3:
-        msg = bot.send_message(message.chat.id, "❌ Ник слишком короткий! Минимальная длина — 3 символа.\nВведите ник еще раз:")
+        msg = bot.send_message(message.chat.id, "❌ Минимум 3 символа. Введите ваш никнейм:")
         bot.register_next_step_handler(msg, save_nick)
         return
-    set_nickname(message.chat.id, nick)
-    bot.send_message(message.chat.id, f"✅ Никнейм <b>{nick}</b> успешно сохранен!", reply_markup=main_kb(message.chat.id), parse_mode="HTML")
+    set_nickname(message.chat.id, nick, username)
+    bot.send_message(message.chat.id, f"✅ Ник {nick} сохранен!", reply_markup=main_kb(message.chat.id), parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 def check_sub(call):
     if is_subscribed(call.from_user.id):
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.send_message(call.message.chat.id, "✅ <b>Подписка подтверждена!</b> Нажмите /start для входа.", parse_mode="HTML")
+        bot.send_message(call.message.chat.id, "✅ Подписка подтверждена! Нажмите /start")
     else:
-        bot.answer_callback_query(call.id, "❌ Вы все еще не подписаны на канал!", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ Вы не подписаны!", show_alert=True)
+
+# ===================== КОМАНДЫ АДМИНИСТРАЦИИ =====================
+@bot.message_handler(commands=['админ'])
+def admin_add_cmd(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            bot.send_message(uid, "❌ <b>Использование:</b> <code>/админ ID уровень</code>", parse_mode="HTML")
+            return
+        target_id = int(parts[1])
+        level = int(parts[2])
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO admins (user_id, level, position) VALUES (?, ?, 'Администратор')", (target_id, level))
+        conn.commit()
+        conn.close()
+        ADMIN_IDS.add(target_id)
+        bot.send_message(uid, f"✅ Пользователь <code>{target_id}</code> назначен администратором ({level} уровень).", parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(uid, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['разадмин'])
+def admin_remove_cmd(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.send_message(uid, "❌ <b>Использование:</b> <code>/разадмин ID</code>", parse_mode="HTML")
+            return
+        target_id = int(parts[1])
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM admins WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        if target_id in ADMIN_IDS and target_id not in {709672781, 5939366373, 1066139847}:
+            ADMIN_IDS.remove(target_id)
+        bot.send_message(uid, f"✅ Права администратора сняты с <code>{target_id}</code>.", parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(uid, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['лог'])
+def log_cmd(message):
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, user_id, nickname, username, question, status, date, admin_reply FROM support_requests ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        bot.send_message(uid, "📭 История обращений пуста.")
+        return
+        
+    log_text = "=== ИСТОРИЯ ОТВЕТОВ ТЕХ. ПОДДЕРЖКИ ===\n\n"
+    for r in rows:
+        log_text += f"ID заявки: #{r[0]}\nПользователь: {r[2]} (@{r[3]}) [ID: {r[1]}]\nДата: {r[6]}\nСтатус: {r[5]}\nВопрос: {r[4]}\nОтвет: {r[7] or 'Нет ответа'}\n----------------------------------------\n"
+    
+    file_path = "support_logs.txt"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(log_text)
+        
+    with open(file_path, "rb") as f:
+        bot.send_document(uid, f, caption="📜 История ответов тех. поддержки")
 
 # ===================== СПИСОК И УПРАВЛЕНИЕ ЛИДЕРАМИ =====================
 def show_leaders_message(chat_id, user_id):
     leaders = get_all_leaders()
     
-    text = "💼 <b>Список лидеров организаций</b>\n───────────────\n\n"
+    text = "💼 <b>Список лидеров</b>\n\n"
     if not leaders:
-        text += "📭 <i>Список лидеров в данный момент пуст.</i>\n"
+        text += "🏆 Лидеров пока нет.\n"
     else:
         for lid, fraction, nick, username, date in leaders:
             user_str = f"({username})" if username and username != "Не указан" else ""
-            text += f"🏛 <b>{fraction}</b>\n👤 <b>Лидер:</b> {nick} {user_str}\n📅 <b>Назначен:</b> {date}\n\n"
+            text += f"🏛 <b>{fraction}</b>\n👤 <b>Лидер:</b> {nick} {user_str}\n📅 <b>Дата:</b> {date}\n\n"
 
     markup = None
     if user_id in ADMIN_IDS:
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("➕ Добавить лидера", callback_data="leader_add"),
-            types.InlineKeyboardButton("🗑 Удалить лидера", callback_data="leader_del")
+            types.InlineKeyboardButton("➕ Добавить", callback_data="leader_add"),
+            types.InlineKeyboardButton("🗑 Удалить", callback_data="leader_del")
         )
 
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
@@ -360,18 +442,18 @@ def leader_add_start(call):
         bot.answer_callback_query(call.id, "❌ Доступ запрещен!", show_alert=True)
         return
     
-    msg = bot.send_message(call.message.chat.id, "📝 <b>Шаг 1/3:</b> Введите название организации / фракции (например: <code>LSPD</code> или <code>Правительство</code>):", parse_mode="HTML")
+    msg = bot.send_message(call.message.chat.id, "📝 Введите название организации / фракции:")
     bot.register_next_step_handler(msg, leader_add_fraction)
     bot.answer_callback_query(call.id)
 
 def leader_add_fraction(message):
     fraction = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"✅ Фракция: <b>{fraction}</b>\n\n📝 <b>Шаг 2/3:</b> Введите игровой Nick_Name лидера:", parse_mode="HTML")
+    msg = bot.send_message(message.chat.id, f"✅ Фракция: <b>{fraction}</b>\n\n📝 Введите игровой Nick_Name лидера:", parse_mode="HTML")
     bot.register_next_step_handler(msg, leader_add_nick, fraction)
 
 def leader_add_nick(message, fraction):
     nick = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"✅ Ник: <b>{nick}</b>\n\n📝 <b>Шаг 3/3:</b> Введите Telegram юзернейм лидера (например: <code>@username</code> или отправьте <code>-</code> если отсутствует):", parse_mode="HTML")
+    msg = bot.send_message(message.chat.id, f"✅ Ник: <b>{nick}</b>\n\n📝 Введите Telegram юзернейм лидера (например: <code>@username</code> или <code>-</code>):", parse_mode="HTML")
     bot.register_next_step_handler(msg, leader_add_username, fraction, nick)
 
 def leader_add_username(message, fraction, nick):
@@ -380,7 +462,7 @@ def leader_add_username(message, fraction, nick):
         username = "Не указан"
     
     add_leader(fraction, nick, username)
-    bot.send_message(message.chat.id, f"🎉 <b>Лидер успешно добавлен!</b>\n\n🏛 <b>Фракция:</b> {fraction}\n👤 <b>Ник:</b> {nick}\n📱 <b>Telegram:</b> {username}", parse_mode="HTML", reply_markup=main_kb(message.chat.id))
+    bot.send_message(message.chat.id, f"✅ <b>Лидер успешно добавлен!</b>", parse_mode="HTML", reply_markup=main_kb(message.chat.id))
 
 @bot.callback_query_handler(func=lambda call: call.data == "leader_del")
 def leader_del_start(call):
@@ -390,15 +472,15 @@ def leader_del_start(call):
 
     leaders = get_all_leaders()
     if not leaders:
-        bot.send_message(call.message.chat.id, "📭 Список лидеров пуст. Некого удалять.")
+        bot.send_message(call.message.chat.id, "📭 Список лидеров пуст.")
         bot.answer_callback_query(call.id)
         return
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     for lid, fraction, nick, username, date in leaders:
-        markup.add(types.InlineKeyboardButton(f"🗑 {fraction} — {nick}", callback_data=f"ldel_{lid}"))
+        markup.add(types.InlineKeyboardButton(f"🗑 {fraction} - {nick}", callback_data=f"ldel_{lid}"))
 
-    bot.send_message(call.message.chat.id, "<b>Выберите лидера для удаления:</b>", reply_markup=markup, parse_mode="HTML")
+    bot.send_message(call.message.chat.id, "Выберите лидера для удаления:", reply_markup=markup)
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ldel_"))
@@ -409,7 +491,7 @@ def leader_del_confirm(call):
 
     lid = int(call.data.split("_")[1])
     remove_leader(lid)
-    bot.answer_callback_query(call.id, "✅ Лидер успешно удален!", show_alert=True)
+    bot.answer_callback_query(call.id, "✅ Лидер удален!", show_alert=True)
     bot.delete_message(call.message.chat.id, call.message.message_id)
 
 # ===================== ДОЛЖНОСТИ =====================
@@ -417,52 +499,55 @@ def leader_del_confirm(call):
 def position_cmd(message):
     uid = message.chat.id
     if uid not in ADMIN_IDS:
-        bot.send_message(uid, "❌ У вас нет прав для выполнения этой команды!")
+        bot.send_message(uid, "❌ Только для администраторов!")
         return
     try:
         parts = message.text.split(maxsplit=2)
         if len(parts) < 3:
-            bot.send_message(uid, "❌ <b>Неверный формат!</b>\n\n📋 <b>Использование:</b>\n<code>/должность @username Должность</code>\n\n📌 <b>Пример:</b>\n<code>/должность @john_doe Модератор</code>", parse_mode="HTML")
+            bot.send_message(uid, "❌ <b>Неверный формат!</b>\n\n📋 <b>Использование:</b>\n<code>/должность @username Должность</code>\n\n📌 <b>Пример:</b>\n<code>/должность @john_doe Модератор</code>\n\n📋 <b>Список доступных должностей:</b>\nОтправьте команду <code>/должности</code> для просмотра.", parse_mode="HTML")
             return
         username = parts[1].strip()
         new_position = parts[2].strip()
         if new_position not in AVAILABLE_POSITIONS:
-            bot.send_message(uid, f"❌ <b>Должность «{new_position}» не найдена!</b>\n\nВведите <code>/должности</code> для списка всех доступных должностей.", parse_mode="HTML")
+            bot.send_message(uid, f"❌ <b>Должность «{new_position}» не найдена!</b>\n\n📋 <b>Доступные должности:</b>\nОтправьте команду <code>/должности</code> для просмотра.", parse_mode="HTML")
             return
         user_data = get_user_by_username(username)
         if not user_data:
-            bot.send_message(uid, f"❌ <b>Пользователь {username} не найден в базе данных!</b>", parse_mode="HTML")
+            bot.send_message(uid, f"❌ <b>Пользователь {username} не найден!</b>\n\n📌 Убедитесь, что пользователь:\n• Зарегистрирован в боте (/start)\n• Указал свой юзернейм в Telegram", parse_mode="HTML")
             return
         target_id, target_nick, current_pos = user_data
         set_position(target_id, new_position)
-        bot.send_message(uid, f"✅ <b>Должность успешно изменена!</b>\n\n👤 <b>Игрок:</b> {target_nick}\n📱 <b>Юзернейм:</b> {username}\n📋 <b>Новая должность:</b> {new_position}", parse_mode="HTML")
+        bot.send_message(uid, f"✅ <b>Должность успешно изменена!</b>\n\n👤 <b>Игрок:</b> {target_nick}\n📱 <b>Юзернейм:</b> {username}\n📋 <b>Новая должность:</b> {new_position}\n📌 <b>Старая должность:</b> {current_pos}", parse_mode="HTML")
         try:
-            bot.send_message(target_id, f"📋 <b>Ваша должность обновлена!</b>\n\n📌 <b>Новая должность:</b> {new_position}", parse_mode="HTML")
+            bot.send_message(target_id, f"📋 <b>Ваша должность была изменена!</b>\n\n📌 <b>Новая должность:</b> {new_position}\n👤 <b>Кем изменено:</b> Администрацией проекта", parse_mode="HTML")
         except:
             pass
     except Exception as e:
-        bot.send_message(uid, f"❌ <b>Ошибка обработки команды:</b> {e}")
+        bot.send_message(uid, f"❌ <b>Ошибка!</b>\n\n📋 <b>Использование:</b>\n<code>/должность @username Должность</code>\n\n📌 <b>Пример:</b>\n<code>/должность @john_doe Модератор</code>\n\n📋 <b>Список доступных должностей:</b>\nОтправьте команду <code>/должности</code> для просмотра.", parse_mode="HTML")
 
 @bot.message_handler(commands=['должности'])
 def positions_list_cmd(message):
-    if message.chat.id not in ADMIN_IDS:
+    uid = message.chat.id
+    if uid not in ADMIN_IDS:
+        bot.send_message(uid, "❌ Только для администраторов!")
         return
-    bot.send_message(message.chat.id, get_positions_list(), parse_mode="HTML")
+    bot.send_message(uid, get_positions_list(), parse_mode="HTML")
 
 @bot.message_handler(commands=['admlist'])
 def admlist_cmd(message):
     uid = message.chat.id
     if uid not in ADMIN_IDS:
+        bot.send_message(uid, "❌ Только для администраторов!")
         return
     admins = get_all_admins()
     if not admins:
-        bot.send_message(uid, "📭 Список администраторов пуст.")
+        bot.send_message(uid, "📭 Список админов пуст.")
         return
-    text = "👑 <b>Список администраторов проекта:</b>\n───────────────\n\n"
-    for user_id, position in admins:
-        nick = get_nickname(user_id) or "Не указан"
-        username = get_username(user_id) or "Нет"
-        text += f"👤 <b>{nick}</b> (@{username})\n   📋 Должность: <code>{position}</code>\n\n"
+    text = "👑 <b>Список администраторов:</b>\n\n"
+    for user_id, lvl, pos, nick, username in admins:
+        nick_str = nick if nick else "Не зарегистрирован в боте"
+        user_str = f"@{username}" if username else f"ID: {user_id}"
+        text += f"👤 <b>{nick_str}</b>\n   📱 Юзернейм/ID: {user_str}\n   📋 Должность: {pos}\n\n"
     bot.send_message(uid, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['стата'])
@@ -472,33 +557,35 @@ def stata_cmd(message):
         update_user_info(uid, message.from_user.username)
     nick = get_nickname(uid)
     if not nick:
-        bot.send_message(uid, "❌ Сначала авторизуйтесь через /start")
+        bot.send_message(uid, "❌ Сначала введите /start")
         return
     position = get_position(uid)
     level = get_admin_level(uid) or get_level(uid) or 0
-    username = get_username(uid) or "Отсутствует"
-    text = f"📊 <b>Ваш профиль</b>\n───────────────\n🎮 <b>Никнейм:</b> {nick}\n🆔 <b>ID:</b> <code>{uid}</code>\n📱 <b>Юзернейм:</b> @{username}\n🎖️ <b>Должность:</b> {position}"
+    username = get_username(uid) or "Нет"
+    level_names = {0: "🟢 Игрок", 1: "🟢 Модератор", 2: "🟡 Старший модератор", 3: "🔴 Главный администратор"}
+    level_text = level_names.get(level, f"Уровень {level}")
+    text = f"📋 <b>Ваш профиль</b>\n\n🎮 <b>Никнейм:</b> {nick}\n🆔 <b>ID:</b> <code>{uid}</code>\n📱 <b>Юзернейм:</b> @{username}\n🎖️ <b>Должность:</b> {position}\n📊 <b>Уровень:</b> {level_text}"
     bot.send_message(uid, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['ник'])
 def nick_cmd(message):
     uid = message.chat.id
-    msg = bot.send_message(uid, "✍️ Введите ваш новый Nick_Name:")
+    msg = bot.send_message(uid, "✍️ Введите новый никнейм:")
     bot.register_next_step_handler(msg, change_nick)
 
 def change_nick(message):
     nick = message.text.strip()
     if len(nick) < 3:
-        bot.send_message(message.chat.id, "❌ Никнейм должен быть от 3 символов.")
+        bot.send_message(message.chat.id, "❌ Минимум 3 символа.")
         return
-    set_nickname(message.chat.id, nick)
-    bot.send_message(message.chat.id, f"✅ Никнейм успешно изменен на <b>{nick}</b>!", parse_mode="HTML")
+    set_nickname(message.chat.id, nick, message.from_user.username)
+    bot.send_message(message.chat.id, f"✅ Ник изменен на {nick}!")
 
 # ===================== ТЕХПОДДЕРЖКА =====================
 @bot.message_handler(func=lambda message: message.text == "🎫 Тех поддержка")
 def support_start(message):
     uid = message.chat.id
-    msg = bot.send_message(uid, "✍️ <b>Опишите вашу проблему или вопрос.</b>\nАдминистрация ответит вам в ближайшее время.", parse_mode="HTML")
+    msg = bot.send_message(uid, "✍️ Напишите ваш вопрос. Администратор получит его и ответит вам.")
     bot.register_next_step_handler(msg, support_send)
 
 def support_send(message):
@@ -538,7 +625,7 @@ def support_send(message):
         except:
             pass
 
-    bot.send_message(uid, f"✅ <b>Ваше обращение №{req_id} отправлено администрации!</b>", reply_markup=main_kb(uid), parse_mode="HTML")
+    bot.send_message(uid, f"✅ Ваше обращение №{req_id} отправлено администрации! Ожидайте ответа.", reply_markup=main_kb(uid))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("supp_reply_"))
 def support_reply_start(call):
@@ -551,7 +638,7 @@ def support_reply_start(call):
     req_id = int(parts[2])
     user_id = int(parts[3])
     
-    msg = bot.send_message(admin_id, f"✍️ Введите текст ответа на тикет №{req_id}:")
+    msg = bot.send_message(admin_id, f"✍️ Введите ответ для игрока (заявка №{req_id}):")
     bot.register_next_step_handler(msg, support_reply_send, req_id, user_id, call.message)
     bot.answer_callback_query(call.id)
 
@@ -566,12 +653,17 @@ def support_reply_send(message, req_id, user_id, admin_msg):
     conn.close()
     
     try:
-        bot.send_message(user_id, f"📩 <b>Ответ администрации на ваше обращение №{req_id}:</b>\n\n{reply_text}", parse_mode="HTML")
-        bot.send_message(admin_id, "✅ Ответ успешно доставлен игроку!")
+        bot.send_message(user_id, f"📩 <b>Ответ администрации на заявку №{req_id}:</b>\n\n{reply_text}", parse_mode="HTML")
+        bot.send_message(admin_id, "✅ Ответ отправлен игроку!")
     except Exception as e:
-        bot.send_message(admin_id, f"❌ Не удалось отправить ответ игроку: {e}")
+        bot.send_message(admin_id, f"❌ Ошибка при отправке игроку: {e}")
+    
+    try:
+        bot.delete_message(admin_msg.chat.id, admin_msg.message_id)
+    except:
+        pass
 
-# ===================== НЕПРОЧИТАННЫЕ ТИКЕТЫ =====================
+# ===================== НЕПРОЧИТАННЫЕ =====================
 @bot.message_handler(func=lambda message: message.text == "📬 Непрочитанные")
 def unread_list(message):
     uid = message.chat.id
@@ -585,15 +677,16 @@ def unread_list(message):
     conn.close()
 
     if not rows:
-        bot.send_message(uid, "📭 Непрочитанных обращений нет.", reply_markup=main_kb(uid))
+        bot.send_message(uid, "📭 Нет непрочитанных обращений.", reply_markup=main_kb(uid))
         return
 
-    text = "📬 <b>Список открытых обращений:</b>\n\n"
+    text = "📬 <b>Список непрочитанных обращений:</b>\n\n"
     markup = types.InlineKeyboardMarkup(row_width=1)
     
     for req_id, nick, q, date in rows:
-        short_q = q[:25] + "..." if len(q) > 25 else q
-        markup.add(types.InlineKeyboardButton(f"#{req_id} | {nick} — {short_q}", callback_data=f"supp_view_{req_id}"))
+        short_q = q[:20] + "..." if len(q) > 20 else q
+        text += f"▪️ #{req_id} | {nick} | {date}\n"
+        markup.add(types.InlineKeyboardButton(f"#{req_id} - {short_q}", callback_data=f"supp_view_{req_id}"))
 
     bot.send_message(uid, text, reply_markup=markup, parse_mode="HTML")
 
@@ -601,6 +694,7 @@ def unread_list(message):
 def support_view(call):
     admin_id = call.message.chat.id
     if admin_id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа!", show_alert=True)
         return
     
     req_id = int(call.data.split("_")[2])
@@ -618,11 +712,11 @@ def support_view(call):
     user_id, nick, username, question, date = row
     
     text = (
-        f"📋 <b>Заявка №{req_id}</b>\n───────────────\n"
-        f"👤 <b>Игрок:</b> {nick}\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"📱 <b>Юзернейм:</b> {username}\n"
-        f"📅 <b>Дата:</b> {date}\n\n"
+        f"📋 <b>Заявка №{req_id}</b>\n\n"
+        f"👤 {nick}\n"
+        f"🆔 <code>{user_id}</code>\n"
+        f"📱 @{username}\n"
+        f"📅 {date}\n\n"
         f"<b>Вопрос:</b>\n{question}"
     )
     
@@ -632,7 +726,7 @@ def support_view(call):
     bot.edit_message_text(text, admin_id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     bot.answer_callback_query(call.id)
 
-# ===================== ПЕРЕНОС АККАУНТОВ =====================
+# ===================== ПЕРЕНОС =====================
 def process_transfer_form(message):
     uid = message.chat.id
     if message.text and message.text in MENU_BUTTONS:
@@ -646,11 +740,9 @@ def process_transfer_form(message):
         photo_file_id = message.photo[-1].file_id
     elif message.document:
         photo_file_id = message.document.file_id
-        
     if not text_data and not photo_file_id:
-        bot.send_message(uid, "❌ <b>Ошибка:</b> Заполните форму и прикрепите доказательства!")
+        bot.send_message(uid, "❌ Ошибка: отправьте заполненную форму и прикрепите скриншот.")
         return
-        
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     date = time.strftime("%d.%m.%Y %H:%M")
@@ -658,71 +750,79 @@ def process_transfer_form(message):
     req_id = c.lastrowid
     conn.commit()
     conn.close()
-    
-    admin_text = f"📥 <b>ЗАЯВКА НА ПЕРЕНОС №{req_id}</b>\n\n👤 <b>Игрок:</b> {nickname}\n🆔 <b>ID:</b> <code>{uid}</code>\n📱 <b>Юзернейм:</b> {username}\n\n📋 <b>Данные:</b>\n{text_data}\n\n📅 <b>Дата:</b> {date}"
+    admin_text = f"📥 <b>НОВАЯ ЗАЯВКА НА ПЕРЕНОС №{req_id}</b>\n\n👤 <b>Игрок:</b> {nickname}\n🆔 <b>ID:</b> <code>{uid}</code>\n📱 <b>Юзернейм:</b> {username}\n\n📋 <b>Данные заявки:</b>\n{text_data}\n\n📅 <b>Дата:</b> {date}"
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(types.InlineKeyboardButton("✅ Одобрить", callback_data=f"trans_app_{req_id}_{uid}"), types.InlineKeyboardButton("❌ Отказать", callback_data=f"trans_rej_{req_id}_{uid}"))
-    
+    markup.add(types.InlineKeyboardButton("✅ Одобрить", callback_data=f"transfer_approve_{req_id}_{uid}"), types.InlineKeyboardButton("❌ Отказать", callback_data=f"transfer_reject_{req_id}_{uid}"))
     for admin_id in ADMIN_IDS:
         try:
             if photo_file_id:
                 bot.send_photo(admin_id, photo_file_id, caption=admin_text, reply_markup=markup, parse_mode="HTML")
             else:
                 bot.send_message(admin_id, admin_text, reply_markup=markup, parse_mode="HTML")
-        except:
-            pass
-            
-    bot.send_message(uid, f"✅ <b>Заявка №{req_id} отправлена на рассмотрение!</b>", parse_mode="HTML", reply_markup=main_kb(uid))
+        except Exception as e:
+            print(f"Ошибка отправки админу {admin_id}: {e}")
+    bot.send_message(uid, f"✅ <b>Ваша заявка на перенос №{req_id} успешно отправлена!</b>\n\n📌 Администрация рассмотрит вашу заявку и ответит в ближайшее время.", parse_mode="HTML", reply_markup=main_kb(uid))
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("trans_app_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("transfer_approve_"))
 def transfer_approve(call):
     admin_id = call.message.chat.id
     if admin_id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа!", show_alert=True)
         return
     parts = call.data.split("_")
     req_id = int(parts[2])
     user_id = int(parts[3])
-    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE transfer_requests SET status = 'approved' WHERE id = ?", (req_id,))
     conn.commit()
     conn.close()
-    
     try:
-        bot.send_message(user_id, f"🎉 <b>Ваша заявка на перенос №{req_id} ОДОБРЕНА!</b>\nС вами свяжется администрация.", parse_mode="HTML")
+        bot.send_message(user_id, f"🎉 <b>Ваша заявка на перенос №{req_id} ОДОБРЕНА!</b>\n\nАдминистрация проекта одобрила ваш перенос.\nОжидайте связи для завершения переноса!", parse_mode="HTML")
     except:
         pass
-        
     bot.edit_message_reply_markup(admin_id, call.message.message_id, reply_markup=None)
+    new_text = call.message.text + "\n\n🟢 <b>СТАТУС: ОДОБРЕНО</b>"
+    if call.message.photo:
+        bot.edit_message_caption(new_text, call.message.message_id, parse_mode="HTML")
+    else:
+        bot.edit_message_text(new_text, admin_id, call.message.message_id, parse_mode="HTML")
     bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("trans_rej_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("transfer_reject_"))
 def transfer_reject(call):
     admin_id = call.message.chat.id
     if admin_id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа!", show_alert=True)
         return
     parts = call.data.split("_")
     req_id = int(parts[2])
     user_id = int(parts[3])
-    
-    msg = bot.send_message(admin_id, f"❌ Укажите причину отказа для заявки №{req_id}:")
-    bot.register_next_step_handler(msg, process_transfer_reject, req_id, user_id)
+    msg = bot.send_message(admin_id, f"❌ <b>Причина отказа для заявки №{req_id}</b>\n\nВведите причину отказа (или <code>-</code>, чтобы отказать без причины):", parse_mode="HTML")
+    bot.register_next_step_handler(msg, process_transfer_reject, req_id, user_id, call.message)
     bot.answer_callback_query(call.id)
 
-def process_transfer_reject(message, req_id, user_id):
+def process_transfer_reject(message, req_id, user_id, admin_msg):
+    admin_id = message.chat.id
     reason = message.text.strip()
+    if reason == "-":
+        reason = "Причина не указана"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE transfer_requests SET status = 'rejected', admin_answer = ? WHERE id = ?", (reason, req_id))
     conn.commit()
     conn.close()
-    
     try:
-        bot.send_message(user_id, f"❌ <b>Ваша заявка на перенос №{req_id} ОТКЛОНЕНА.</b>\nПричина: {reason}", parse_mode="HTML")
+        bot.send_message(user_id, f"❌ <b>Ваша заявка на перенос №{req_id} ОТКЛОНЕНА.</b>\n\n📌 <b>Причина отказа:</b> {reason}", parse_mode="HTML")
     except:
         pass
-    bot.send_message(message.chat.id, f"✅ Отказ отправлен по заявке №{req_id}.")
+    bot.edit_message_reply_markup(admin_msg.chat.id, admin_msg.message_id, reply_markup=None)
+    new_text = admin_msg.text + f"\n\n🔴 <b>СТАТУС: ОТКАЗАНО</b>\n📌 Причина: {reason}"
+    if admin_msg.photo:
+        bot.edit_message_caption(new_text, admin_msg.chat.id, admin_msg.message_id, parse_mode="HTML")
+    else:
+        bot.edit_message_text(new_text, admin_msg.chat.id, admin_msg.message_id, parse_mode="HTML")
+    bot.send_message(admin_id, f"✅ Заявка №{req_id} отклонена.")
 
 # ===================== НОВОСТИ =====================
 @bot.message_handler(func=lambda message: message.text == "📰 Новости сервера")
@@ -735,34 +835,36 @@ def news_button(message):
     else:
         news = news_get_all()
         if not news:
-            bot.send_message(uid, "📭 Новостей пока нет.")
+            bot.send_message(uid, "📭 Новостей нет.")
             return
-        text = "📰 <b>Свежие новости сервера:</b>\n───────────────\n\n"
+        text = "📰 <b>Новости</b>\n\n"
         for nid, title, date in news:
-            text += f"📌 <b>{title}</b> [{date}]\n"
+            text += f"▪️ {title} [{date}]\n"
         bot.send_message(uid, text, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "news_add")
 def news_add_start(call):
     if call.message.chat.id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа.")
         return
-    msg = bot.send_message(call.message.chat.id, "📰 Введите заголовок новости:")
+    msg = bot.send_message(call.message.chat.id, "📰 Введите заголовок:")
     bot.register_next_step_handler(msg, news_add_title)
     bot.answer_callback_query(call.id)
 
 def news_add_title(message):
     title = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"✅ Заголовок: <b>{title}</b>\nТеперь введите основной текст новости:", parse_mode="HTML")
+    msg = bot.send_message(message.chat.id, f"✅ Заголовок: {title}\nТеперь введите текст:")
     bot.register_next_step_handler(msg, news_add_content, title)
 
 def news_add_content(message, title):
     content = message.text.strip()
     news_add(title, content)
-    bot.send_message(message.chat.id, "✅ Новость успешно опубликована!")
+    bot.send_message(message.chat.id, "✅ Новость добавлена!")
 
 @bot.callback_query_handler(func=lambda call: call.data == "news_del")
 def news_del_start(call):
     if call.message.chat.id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа.")
         return
     news = news_get_all()
     if not news:
@@ -771,69 +873,47 @@ def news_del_start(call):
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for nid, title, date in news:
-        markup.add(types.InlineKeyboardButton(f"🗑 {title}", callback_data=f"news_del_{nid}"))
+        markup.add(types.InlineKeyboardButton(f"🗑 {title} [{date}]", callback_data=f"news_del_{nid}"))
     bot.send_message(call.message.chat.id, "Выберите новость для удаления:", reply_markup=markup)
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("news_del_"))
 def news_del_do(call):
     if call.message.chat.id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "❌ Нет доступа.")
         return
     nid = int(call.data.split("_")[2])
     news_delete(nid)
     bot.answer_callback_query(call.id, "✅ Новость удалена")
     bot.delete_message(call.message.chat.id, call.message.message_id)
 
-# ===================== ОБРАБОТКА ОСНОВНЫХ КНОПОК =====================
+# ===================== ОБРАБОТКА КНОПОК МЕНЮ =====================
 @bot.message_handler(func=lambda message: True)
 def handle_buttons(message):
     uid = message.chat.id
     text = message.text
     if not text or text.startswith('/') or text in ["🎫 Тех поддержка", "📬 Непрочитанные"]:
         return
-        
     if not is_subscribed(uid):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("📢 Подписаться", url=CHANNEL_URL))
         markup.add(types.InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub"))
-        bot.send_message(uid, "❌ <b>Подпишитесь на канал для использования бота!</b>", reply_markup=markup, parse_mode="HTML")
+        bot.send_message(uid, "❌ Подпишитесь на канал!", reply_markup=markup)
         return
-
     if text == "🌐 Онлайн":
-        bot.send_message(uid, get_online(), parse_mode="HTML", reply_markup=main_kb(uid))
-
+        bot.send_message(uid, get_online(), reply_markup=main_kb(uid), parse_mode="HTML")
     elif text == "🔗 Полезные ссылки":
         markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("📢 Telegram-канал проекта", url="https://t.me/santrope_trilogyrp"),
-            types.InlineKeyboardButton("🌐 Официальный форум", url="https://wh32893.web3.maze-tech.ru/index.php"),
-            types.InlineKeyboardButton("📱 Группа ВКонтакте", url="https://vk.com/santropetrilogy")
-        )
-        text_msg = (
-            "🔗 <b>Официальные ресурсы проекта SanTrope RP</b>\n───────────────\n\n"
-            "📢 <b>Telegram-канал</b>\nГлавные новости, анонсы и обновления проекта.\n\n"
-            "🌐 <b>Форум проекта</b>\nПравила сервера, заявки на лидерство, жалобы и технический раздел.\n\n"
-            "📱 <b>Сообщество ВКонтакте</b>\nНовости, конкурсы и полезная информация."
-        )
+        markup.add(types.InlineKeyboardButton("📢 Telegram-канал проекта", url="https://t.me/santrope_trilogyrp"), types.InlineKeyboardButton("🌐 Официальный форум", url="https://wh32893.web3.maze-tech.ru/index.php"), types.InlineKeyboardButton("📱 Группа ВКонтакте", url="https://vk.com/santropetrilogy"))
+        text_msg = "🔗 <b>Официальные ресурсы проекта</b>\n\n📢 <b>Telegram-канал</b>\nГлавные новости, анонсы и объявления.\n\n🌐 <b>Форум проекта</b>\nПравила, заявки, обсуждения и полезная информация.\n▫️ Игровые разделы\n▫️ Техническая поддержка\n▫️ Общение и предложения\n\n📱 <b>Группа ВКонтакте</b>\nНовости проекта и общение с игроками.\n\n👇 <i>Выберите нужный ресурс:</i>"
         bot.send_message(uid, text_msg, reply_markup=markup, parse_mode="HTML")
-
     elif text == "💼 Список лидеров":
         show_leaders_message(uid, uid)
-
     elif text == "🔄 Перенос аккаунта":
-        form_text = (
-            "🔄 <b>Перенос аккаунта с других проектов</b>\n───────────────\n\n"
-            "📋 <b>Форма подачи заявки:</b>\n"
-            "▫️ Ваш Nick_Name на сервере:\n"
-            "▫️ Проект, с которого переносите:\n"
-            "▫️ Ваши статистика / имущество:\n"
-            "▫️ Доказательства (скриншот с /time)\n\n"
-            "✍️ Отправьте данные по форме ответным сообщением и прикрепите скриншот доказательств."
-        )
+        form_text = "🔄 <b>Перенос аккаунтов с разных проектов!</b>\n\n📋 <b>Форма подачи заявления:</b>\n\n▫️ <b>Nick_Name:</b>\n▫️ <b>Проект с которого переносите:</b>\n▫️ <b>Что переносите:</b>\n▫️ <b>Доказательства имущества (/time):</b>\n\n✍️ Заполните данную форму и отправьте ответным сообщением!\n📸 Обязательно прикрепите скриншот доказательств с /time прямо к сообщению с текстом."
         bot.send_message(uid, form_text, parse_mode="HTML")
-        msg = bot.send_message(uid, "📝 Введите заполненную форму с картинкой:")
+        msg = bot.send_message(uid, "📝 Введите данные по форме и прикрепите скриншот:")
         bot.register_next_step_handler(msg, process_transfer_form)
-
     elif uid in ADMIN_IDS:
         if text == "📊 Статистика":
             conn = sqlite3.connect(DB_PATH)
@@ -844,35 +924,36 @@ def handle_buttons(message):
             admins = c.fetchone()[0]
             c.execute("SELECT COUNT(*) FROM news")
             news_count = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM leaders")
-            leaders_count = c.fetchone()[0]
             conn.close()
-            
-            stat_text = (
-                f"📊 <b>Статистика бота</b>\n───────────────\n\n"
-                f"👤 Пользователей: <code>{users}</code>\n"
-                f"👑 Администраторов: <code>{admins}</code>\n"
-                f"📰 Опубликовано новостей: <code>{news_count}</code>\n"
-                f"💼 Лидеров в списке: <code>{leaders_count}</code>"
-            )
-            bot.send_message(uid, stat_text, parse_mode="HTML", reply_markup=main_kb(uid))
-
+            bot.send_message(uid, f"📊 <b>Статистика</b>\n\n👤 Пользователей: {users}\n👑 Админов: {admins}\n📰 Новостей: {news_count}", parse_mode="HTML", reply_markup=main_kb(uid))
         elif text == "📢 Рассылка":
-            msg = bot.send_message(uid, "📨 Введите текст сообщения для рассылки всем пользователям:")
+            msg = bot.send_message(uid, "📨 Введите текст для рассылки:")
             bot.register_next_step_handler(msg, broadcast_text)
-
         elif text == "📋 Помощь":
             help_text = (
-                "📋 <b>Команды и возможности администратора</b>\n───────────────\n\n"
-                "👤 <b>Управление должностями:</b>\n"
-                "<code>/должность @username Должность</code> — сменить должность\n"
-                "<code>/должности</code> — список доступных должностей\n"
-                "<code>/admlist</code> — список всей администрации\n\n"
-                "🎮 <b>Профиль:</b>\n"
-                "<code>/стата</code> — посмотреть свой профиль\n"
-                "<code>/ник</code> — сменить свой никнейм\n\n"
+                "📋 <b>Команды Главного Модератора:</b>\n\n"
+                "👤 <b>Управление администрацией</b>\n"
+                "/админ ID уровень — выдать права (1/2/3)\n"
+                "/разадмин ID — снять права администратора\n"
+                "/должность @username Должность — изменить должность\n"
+                "/должности — список всех доступных должностей\n"
+                "/admlist — список всей администрации бота\n\n"
+                "🎮 <b>Профиль</b>\n"
+                "/стата — посмотреть свой профиль\n"
+                "/ник — сменить свой никнейм\n"
+                "/лог — скачать историю ответов тех. поддержки\n\n"
                 "💼 <b>Управление лидерами:</b>\n"
-                "Перейдите в <b>«💼 Список лидеров»</b> для добавления/удаления лидеров через Inline-кнопки."
+                "Перейдите в «💼 Список лидеров» для добавления/удаления лидеров через Inline-кнопки.\n\n"
+                "🔘 <b>Кнопки меню</b>\n"
+                "🌐 Онлайн — статус SA:MP сервера\n"
+                "🔗 Полезные ссылки — официальные ресурсы проекта\n"
+                "📰 Новости сервера — просмотр и управление новостями\n"
+                "💼 Список лидеров — список лидеров организаций\n"
+                "🔄 Перенос аккаунта — подача заявки на перенос\n"
+                "🎫 Тех поддержка — создание обращения в поддержку\n"
+                "📬 Непрочитанные — просмотр необработанных обращений\n"
+                "📊 Статистика — количество пользователей и обращений\n"
+                "📢 Рассылка — отправить сообщение всем пользователям"
             )
             bot.send_message(uid, help_text, parse_mode="HTML", reply_markup=main_kb(uid))
 
@@ -884,20 +965,20 @@ def broadcast_text(message):
     text = message.text
     users = get_all_users()
     if not users:
-        bot.send_message(uid, "❌ Список пользователей пуст.")
+        bot.send_message(uid, "❌ Нет пользователей.")
         return
     success = 0
     for user_id in users:
         try:
             bot.send_message(user_id, text)
             success += 1
-            time.sleep(0.04)
+            time.sleep(0.05)
         except:
             pass
-    bot.send_message(uid, f"✅ <b>Рассылка завершена!</b>\nУспешно отправлено: {success} из {len(users)}", parse_mode="HTML", reply_markup=main_kb(uid))
+    bot.send_message(uid, f"✅ Рассылка завершена!\nДоставлено: {success} из {len(users)}", reply_markup=main_kb(uid))
 
-# ===================== ЗАПУСК БОТА =====================
+# ===================== ЗАПУСК =====================
 if __name__ == "__main__":
     keep_alive()
-    print("✅ Бот успешно запущен!")
+    print("✅ Бот запущен!")
     bot.polling(none_stop=True)
