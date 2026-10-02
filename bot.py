@@ -40,11 +40,11 @@ def load_dotenv(path=".env"):
 
 load_dotenv()
 
-TOKEN = os.getenv("8736206770:AAEdRu_27hMZlsRh1rI9OEJlUgX9xUZKbTg ", "")
+TOKEN = "8736206770:AAEdRu_27hMZlsRh1rI9OEJlUgX9xUZKbTg"
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "7777"))
-REQUIRED_CHANNEL = os.getenv("@santropetrilogybot_news", "")
-CHANNEL_URL = os.getenv("https://t.me/santropetrilogybot_news ", "")
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
+CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 DB_PATH = os.getenv("DB_PATH", "bot_stats.db")
 BOT_NAME = os.getenv("BOT_NAME", "SA:MP Project Bot")
 
