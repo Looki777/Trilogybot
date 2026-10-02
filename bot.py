@@ -7,7 +7,10 @@ import traceback
 from datetime import datetime
 
 import telebot
-from telebot import types
+from telebot import types, apihelper
+
+# Middleware handlers are used below, so enable middleware before creating TeleBot.
+apihelper.ENABLE_MIDDLEWARE = True
 
 try:
     from keep_alive import keep_alive
