@@ -40,7 +40,7 @@ def load_dotenv(path=".env"):
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736206770:AAG_wQYK5QhiG053lW7yPkwRShnstTs_Ovc")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "7777"))
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
