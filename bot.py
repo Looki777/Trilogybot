@@ -7,10 +7,7 @@ import traceback
 from datetime import datetime
 
 import telebot
-from telebot import types, apihelper
-
-# Middleware handlers are used below, so enable middleware before creating TeleBot.
-apihelper.ENABLE_MIDDLEWARE = True
+from telebot import types
 
 try:
     from keep_alive import keep_alive
@@ -43,7 +40,7 @@ def load_dotenv(path=".env"):
 
 load_dotenv()
 
-TOKEN = "8736206770:AAEdRu_27hMZlsRh1rI9OEJlUgX9xUZKbTg"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736206770:AAG_wQYK5QhiG053lW7yPkwRShnstTs_Ovc")
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "7777"))
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
@@ -61,6 +58,7 @@ for raw_id in os.getenv("ADMIN_IDS", "").split(","):
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан. Укажите его в .env или переменной окружения.")
 
+telebot.apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 DB_LOCK = threading.RLock()
 
