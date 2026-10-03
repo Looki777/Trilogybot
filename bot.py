@@ -40,16 +40,16 @@ def load_dotenv(path=".env"):
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TOKEN = os.getenv("8736206770:AAEdRu_27hMZlsRh1rI9OEJlUgX9xUZKbTg ", "")
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "7777"))
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
-CHANNEL_URL = os.getenv("CHANNEL_URL", "")
+REQUIRED_CHANNEL = os.getenv("@santropetrilogybot_news", "")
+CHANNEL_URL = os.getenv("https://t.me/santropetrilogybot_news ", "")
 DB_PATH = os.getenv("DB_PATH", "bot_stats.db")
 BOT_NAME = os.getenv("BOT_NAME", "SA:MP Project Bot")
 
 # Comma-separated Telegram IDs: ADMIN_IDS=709672781
-ADMIN_IDS = set()
+ADMIN_IDS = {709672781}
 for raw_id in os.getenv("ADMIN_IDS", "").split(","):
     raw_id = raw_id.strip()
     if raw_id.isdigit():
@@ -58,7 +58,6 @@ for raw_id in os.getenv("ADMIN_IDS", "").split(","):
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан. Укажите его в .env или переменной окружения.")
 
-telebot.apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 DB_LOCK = threading.RLock()
 
